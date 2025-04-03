@@ -647,8 +647,8 @@ func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
 
 	for _, serverScreen := range serverScreens {
 		// Log coordinates and screen bounds being checked
-		// log.Printf("Checking (%d,%d) against Screen %d: X[%d -> %d], Y[%d -> %d]",
-		// 	x, y, serverScreen.ID, serverScreen.X, serverScreen.X+serverScreen.W, serverScreen.Y, serverScreen.Y+serverScreen.H)
+		log.Printf("Checking (%d,%d) against Screen %d: X[%d -> %d], Y[%d -> %d]",
+			x, y, serverScreen.ID, serverScreen.X, serverScreen.X+serverScreen.W, serverScreen.Y, serverScreen.Y+serverScreen.H)
 
 		const edgeBuffer = 2 // Keep buffer slightly increased
 		currentEdge := types.ScreenEdge("")

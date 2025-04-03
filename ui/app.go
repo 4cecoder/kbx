@@ -300,15 +300,43 @@ func (a *AppUI) startClientUI() {
 			select {
 			case <-refreshTicker.C:
 				found := a.client.GetFoundServers()
-				servers := []string{}
-				newServerMap := make(map[string]types.DiscoveryMessage)
+				servers := []string{}                                   // For display list
+				newServerMap := make(map[string]types.DiscoveryMessage) // For lookup
+
+				// Build display list and map
 				for _, info := range found {
 					displayStr := fmt.Sprintf("%s (%s - %s)", info.Hostname, info.ServerIP, info.OS)
 					servers = append(servers, displayStr)
 					newServerMap[displayStr] = info
 				}
+
+				// Check for auto-connect condition
+				if len(found) == 1 {
+					// Double-check map has exactly one entry
+					if len(found) == 1 {
+						log.Println("Found exactly one server, attempting auto-connect...")
+						var serverInfo types.DiscoveryMessage
+						// Iterate map to get the single value (key doesn't matter here)
+						for _, info := range found {
+							serverInfo = info
+							break // Found the one, exit loop
+						}
+						addr := fmt.Sprintf("%s:%d", serverInfo.ServerIP, serverInfo.Port) // Build address from the extracted value
+
+						// Stop ticker and attempt connection
+						close(stopTickerChan)
+						a.attemptClientConnect(addr)
+						return // Exit this goroutine
+					} else {
+						// This case should logically not be reached if len(found) == 1
+						log.Println("Error: Inconsistent state during auto-connect check.")
+					}
+				}
+
+				// Update UI list only if not auto-connecting
 				discoveredServersBinding.Set(servers)
-				serverMap = newServerMap
+				serverMap = newServerMap // Update the map used by OnSelected
+
 			case <-stopTickerChan:
 				log.Println("Stopping discovery refresh ticker.")
 				return
@@ -318,28 +346,12 @@ func (a *AppUI) startClientUI() {
 
 	connectBtn := widget.NewButton("Connect", func() {
 		serverAddr := ipEntry.Text
-		if serverAddr == "" {
-			// TODO: Show a message
-			return
-		}
-
-		close(stopTickerChan)
-
-		err := a.client.Connect(serverAddr)
-		if err != nil {
-			log.Printf("Error connecting: %v", err)
-			errorLabel := widget.NewLabel(fmt.Sprintf("Error connecting: %v", err))
-			backBtn := widget.NewButton("Back", func() {
-				a.startClientUI() // Go back to client discovery UI
-			})
-			a.mainWin.SetContent(container.NewVBox(errorLabel, backBtn))
-			return
-		}
-		a.showClientStatusScreen()
+		close(stopTickerChan)              // Stop discovery refresh
+		a.attemptClientConnect(serverAddr) // Use the extracted connect logic
 	})
 
 	backBtn := widget.NewButton("Back", func() {
-		close(stopTickerChan)
+		close(stopTickerChan) // Stop discovery refresh
 		if a.client != nil {
 			a.client.Stop()
 			a.client = nil
@@ -355,6 +367,37 @@ func (a *AppUI) startClientUI() {
 	)
 
 	a.mainWin.SetContent(content)
+}
+
+// attemptClientConnect tries to connect to the given server address and updates UI.
+func (a *AppUI) attemptClientConnect(serverAddr string) {
+	if serverAddr == "" {
+		// TODO: Show a user message/dialog about empty address
+		log.Println("Attempted connect with empty address.")
+		return
+	}
+	if a.client == nil {
+		log.Println("Connect attempt failed: client is nil.")
+		// Maybe recreate client or go back to main menu?
+		// For now, just return to avoid panic
+		return
+	}
+
+	log.Printf("Attempting to connect to %s...", serverAddr)
+	err := a.client.Connect(serverAddr)
+	if err != nil {
+		log.Printf("Error connecting: %v", err)
+		// Display error on the client UI page
+		errorLabel := widget.NewLabel(fmt.Sprintf("Error connecting to %s: %v", serverAddr, err))
+		backToDiscoveryBtn := widget.NewButton("Back to Discovery", func() {
+			a.startClientUI() // Go back to client discovery UI
+		})
+		a.mainWin.SetContent(container.NewVBox(errorLabel, backToDiscoveryBtn))
+		return
+	}
+	// Connection successful
+	log.Println("Connection successful.")
+	a.showClientStatusScreen()
 }
 
 // showClientStatusScreen displays the screen after successfully connecting as a client
