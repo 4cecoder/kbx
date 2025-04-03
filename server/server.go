@@ -440,6 +440,7 @@ func (s *Server) captureAndTrackInput() {
 
 		} else {
 			// --- Currently controlling local server ---
+			// log.Printf("MouseMove: Local control, checking edge transition for (%d, %d)", x, y) // Add this log
 			switchToClient, targetClientAddr, targetLink := s.checkEdgeTransition(x, y)
 
 			if switchToClient {
@@ -645,17 +646,21 @@ func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
 	serverHostname, _ := os.Hostname()
 
 	for _, serverScreen := range serverScreens {
-		const edgeBuffer = 2 // Increased buffer slightly
+		// Log coordinates and screen bounds being checked
+		// log.Printf("Checking (%d,%d) against Screen %d: X[%d -> %d], Y[%d -> %d]",
+		// 	x, y, serverScreen.ID, serverScreen.X, serverScreen.X+serverScreen.W, serverScreen.Y, serverScreen.Y+serverScreen.H)
+
+		const edgeBuffer = 2 // Keep buffer slightly increased
 		currentEdge := types.ScreenEdge("")
 
 		// Check edges with buffer
 		if x >= serverScreen.X && x <= serverScreen.X+edgeBuffer && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H {
 			currentEdge = types.EdgeLeft
-		} else if x >= serverScreen.X+serverScreen.W-edgeBuffer && x <= serverScreen.X+serverScreen.W && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H {
+		} else if x >= serverScreen.X+serverScreen.W-edgeBuffer && x <= serverScreen.X+serverScreen.W+edgeBuffer && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H { // Loosened upper bound
 			currentEdge = types.EdgeRight
 		} else if y >= serverScreen.Y && y <= serverScreen.Y+edgeBuffer && x >= serverScreen.X && x < serverScreen.X+serverScreen.W {
 			currentEdge = types.EdgeTop
-		} else if y >= serverScreen.Y+serverScreen.H-edgeBuffer && y <= serverScreen.Y+serverScreen.H && x >= serverScreen.X && x < serverScreen.X+serverScreen.W {
+		} else if y >= serverScreen.Y+serverScreen.H-edgeBuffer && y <= serverScreen.Y+serverScreen.H+edgeBuffer && x >= serverScreen.X && x < serverScreen.X+serverScreen.W { // Loosened upper bound
 			currentEdge = types.EdgeBottom
 		}
 
