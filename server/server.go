@@ -39,6 +39,10 @@ type Server struct {
 	discoveryStop chan struct{}
 	// Channel to signal UI about new client connections / monitor info updates
 	ClientUpdateChan chan *ClientConnection
+
+	// Input Redirection State
+	remoteInputActive bool   // Is input currently directed to a client?
+	activeClientAddr  string // Which client address is receiving input?
 }
 
 // getLocalMonitorInfo gathers information about the server's monitors
@@ -70,6 +74,9 @@ func NewServer(port int) (*Server, error) {
 		stopChan:         make(chan struct{}),
 		discoveryStop:    make(chan struct{}),
 		ClientUpdateChan: make(chan *ClientConnection, 5), // Buffered channel for UI updates
+		// Initial state: input is local
+		remoteInputActive: false,
+		activeClientAddr:  "",
 	}, nil
 }
 
@@ -87,6 +94,8 @@ func (s *Server) Start() {
 	go s.acceptConnections()
 	go s.captureKeyboard()
 	go s.startDiscoveryBroadcaster()
+	// TODO: Add mouse tracking goroutine later
+	// go s.trackMouseForEdgeTransitions()
 }
 
 func (s *Server) Stop() {
@@ -202,21 +211,52 @@ func (s *Server) removeClient(addr string) {
 
 func (s *Server) captureKeyboard() {
 	hook.Register(hook.KeyDown, []string{}, func(e hook.Event) {
-		fmt.Printf("KeyDown: %s\n", e.Keychar)
-		event := types.KeyEvent{
-			Type:    "keydown",
-			Keychar: string(e.Keychar),
+		s.clientsMutex.RLock()
+		isRemote := s.remoteInputActive
+		activeAddr := s.activeClientAddr
+		client, clientExists := s.clients[activeAddr]
+		s.clientsMutex.RUnlock()
+
+		if isRemote && clientExists { // Only process if input is remote and client exists
+			fmt.Printf("[Remote] KeyDown: %s -> %s\n", e.Keychar, activeAddr)
+			event := types.KeyEvent{
+				Type:    "keydown",
+				Keychar: string(e.Keychar),
+			}
+			// Send only to the active client
+			err := s.sendMessage(client, types.TypeKeyEvent, event)
+			if err != nil {
+				fmt.Printf("Error sending key event to active client %s: %v. Removing client.\n", activeAddr, err)
+				go s.removeClient(activeAddr) // Schedule removal
+			}
+			// TODO: Should we suppress the local event somehow?
+			// hook.StopPropagation() // - Check gohook docs if needed/possible
+		} else {
+			// fmt.Printf("[Local] KeyDown: %s\n", e.Keychar) // Optional debug
 		}
-		s.broadcastEvent(event)
 	})
 
 	hook.Register(hook.KeyUp, []string{}, func(e hook.Event) {
-		fmt.Printf("KeyUp: %s\n", e.Keychar)
-		event := types.KeyEvent{
-			Type:    "keyup",
-			Keychar: string(e.Keychar),
+		s.clientsMutex.RLock()
+		isRemote := s.remoteInputActive
+		activeAddr := s.activeClientAddr
+		client, clientExists := s.clients[activeAddr]
+		s.clientsMutex.RUnlock()
+
+		if isRemote && clientExists { // Only process if input is remote and client exists
+			fmt.Printf("[Remote] KeyUp: %s -> %s\n", e.Keychar, activeAddr)
+			event := types.KeyEvent{
+				Type:    "keyup",
+				Keychar: string(e.Keychar),
+			}
+			err := s.sendMessage(client, types.TypeKeyEvent, event)
+			if err != nil {
+				fmt.Printf("Error sending key event to active client %s: %v. Removing client.\n", activeAddr, err)
+				go s.removeClient(activeAddr)
+			}
+		} else {
+			// fmt.Printf("[Local] KeyUp: %s\n", e.Keychar)
 		}
-		s.broadcastEvent(event)
 	})
 
 	evh := hook.Start()
@@ -227,28 +267,14 @@ func (s *Server) captureKeyboard() {
 		case <-s.stopChan:
 			return
 		case <-evh:
+			// We handle events via the registered callbacks now
 		}
 	}
 }
 
-// broadcastEvent sends an event to all connected clients
-func (s *Server) broadcastEvent(event types.KeyEvent) {
-	s.clientsMutex.RLock() // Use RLock for reading the map
-	defer s.clientsMutex.RUnlock()
-
-	if len(s.clients) == 0 {
-		return // No clients to send to
-	}
-
-	for addr, client := range s.clients {
-		err := s.sendMessage(client, types.TypeKeyEvent, event)
-		if err != nil {
-			fmt.Printf("Error sending event to client %s: %v. Removing client.\n", addr, err)
-			// Need to handle removal carefully - maybe schedule removal outside RLock
-			go s.removeClient(addr) // Remove client in a separate goroutine
-		}
-	}
-}
+// broadcastEvent - This is no longer suitable for key events as they go to a specific client.
+// We might need a different broadcast mechanism for other message types later.
+/* func (s *Server) broadcastEvent(event types.KeyEvent) { ... } */
 
 // startDiscoveryBroadcaster periodically sends out UDP multicast messages
 func (s *Server) startDiscoveryBroadcaster() {
