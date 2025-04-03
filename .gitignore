@@ -1,0 +1,39 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Output of go build
+kb
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of coverage testing
+*.out
+
+# Dependency directories (remove the comment below if you want to commit vendor)
+# vendor/
+
+# Go workspace file
+go.work
+
+# Environment configuration
+.env*
+! .env.example
+
+# IDE / Editor directories
+.vscode/
+.idea/
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db 
