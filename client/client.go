@@ -178,6 +178,19 @@ func (c *Client) receiveMessages() {
 				// Notify UI if channel exists
 				// select { case c.ServerInfoUpdateChan <- c.serverMonitorInfo: default: }
 
+			case types.TypeMouseEvent:
+				payloadBytes, _ := json.Marshal(wrappedMsg.Payload)
+				var mouseEvent types.MouseEvent
+				err := json.Unmarshal(payloadBytes, &mouseEvent)
+				if err != nil {
+					fmt.Printf("Error unmarshaling MouseEvent: %v\n", err)
+					continue
+				}
+
+				// Move the mouse cursor to the coordinates received from the server
+				robotgo.Move(mouseEvent.X, mouseEvent.Y)
+				fmt.Printf("Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+
 			default:
 				fmt.Printf("Received unhandled message type '%s' from server\n", wrappedMsg.Type)
 			}
