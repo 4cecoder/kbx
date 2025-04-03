@@ -279,18 +279,26 @@ func (s *Server) captureAndTrackInput() {
 
 	// --- Register Keyboard Hooks (Signature: func(e hook.Event)) ---
 	hook.Register(hook.KeyDown, []string{}, func(e hook.Event) {
+		// Debug logging for all key events
+		log.Printf("DEBUG: KeyDown event - Keychar: %s, Rawcode: %d, Keycode: %d, Mask: %d",
+			string(e.Keychar), e.Rawcode, e.Keycode, e.Mask)
+
 		s.clientsMutex.RLock()
 		isRemote := s.remoteInputActive
 		activeAddr := s.activeClientAddr
 		s.clientsMutex.RUnlock()
 
 		// Handle keyboard shortcuts for explicit monitor switching
-		if e.Rawcode == 124 && (e.Mask&4 != 0) { // Alt+Right Arrow key (4 is ALT modifier)
-			log.Printf("SHORTCUT: Alt+Right detected - forcing transition to client")
+		// On Mac, right arrow is 124 and left arrow is 123
+		// Try multiple keyboard combinations
+		if (e.Rawcode == 124 && ((e.Mask&4 != 0) || (e.Mask&8 != 0))) || // Right Arrow + (Alt or Cmd)
+			(e.Rawcode == 48 && (e.Mask&8 != 0)) || // Tab key (48) + Cmd (8)
+			e.Rawcode == 122 { // F1 key (122) - no modifier needed
+			log.Printf("SHORTCUT: Detected shortcut (code %d) - forcing transition to client", e.Rawcode)
 
 			// If we're already remote, this does nothing
 			if isRemote {
-				log.Printf("SHORTCUT: Already controlling client, ignoring Alt+Right")
+				log.Printf("SHORTCUT: Already controlling client, ignoring shortcut")
 				return
 			}
 
@@ -364,12 +372,14 @@ func (s *Server) captureAndTrackInput() {
 			_ = s.sendMessage(activeClient, types.TypeMouseEvent, initMouseEvent)
 
 			return
-		} else if e.Rawcode == 123 && (e.Mask&4 != 0) { // Alt+Left Arrow key (4 is ALT modifier)
-			log.Printf("SHORTCUT: Alt+Left detected - forcing transition to server")
+		} else if (e.Rawcode == 123 && ((e.Mask&4 != 0) || (e.Mask&8 != 0))) || // Left Arrow + (Alt or Cmd)
+			(e.Rawcode == 50 && (e.Mask&8 != 0)) || // Backtick key (50) + Cmd (8)
+			e.Rawcode == 120 { // F2 key (120) - no modifier needed
+			log.Printf("SHORTCUT: Detected shortcut (code %d) - forcing transition to server", e.Rawcode)
 
 			// If we're already on server, this does nothing
 			if !isRemote {
-				log.Printf("SHORTCUT: Already controlling server, ignoring Alt+Left")
+				log.Printf("SHORTCUT: Already controlling server, ignoring shortcut")
 				return
 			}
 
