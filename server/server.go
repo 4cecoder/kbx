@@ -736,6 +736,10 @@ func (s *Server) trackMouseInput() {
 						}
 					}
 					s.clientsMutex.Unlock()
+					// Move server cursor off-screen after switching to client
+					if stillExists { // Only move if the switch didn't fail due to disconnect
+						robotgo.MoveMouse(-1, -1)
+					}
 				}
 			}
 
