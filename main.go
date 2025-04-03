@@ -32,6 +32,27 @@ var mainApp fyne.App // Keep reference to the app
 var monitorWindows = make(map[string]fyne.Window)
 var monitorWindowsMutex sync.Mutex
 
+// VirtualScreen represents a screen in the combined virtual layout
+type VirtualScreen struct {
+	ID       int              `json:"id"`
+	Hostname string           `json:"hostname"`
+	IsServer bool             `json:"is_server"`
+	Original types.ScreenRect `json:"original"` // Original dimensions/coords
+	Widget   *monitorWidget   `json:"-"`        // Reference to the widget
+	Position fyne.Position    `json:"position"` // Current position in the layout window (scaled)
+	Size     fyne.Size        `json:"size"`     // Current size in the layout window (scaled)
+}
+
+// VirtualLayout holds the arrangement for a specific client connection
+// For now, stored in memory only.
+var virtualLayouts = make(map[string]map[string]*VirtualScreen) // map[clientAddr][screenKey]*VirtualScreen
+var virtualLayoutsMutex sync.Mutex
+
+// Helper to create a unique key for a screen
+func screenKey(hostname string, screenID int) string {
+	return fmt.Sprintf("%s-%d", hostname, screenID)
+}
+
 // getLocalMonitorInfo moved here from server/client as it uses common packages
 func getLocalMonitorInfo() types.MonitorInfo {
 	hostname, _ := os.Hostname()
@@ -61,47 +82,123 @@ func main() {
 	window.ShowAndRun()
 }
 
-// showMonitorManagementWindow creates and shows a new window displaying monitor info
+// showMonitorManagementWindow creates and shows a new window displaying draggable monitors
 func showMonitorManagementWindow(clientAddr string, serverInfo types.MonitorInfo, clientInfo types.MonitorInfo) {
 	monitorWindowsMutex.Lock()
-	defer monitorWindowsMutex.Unlock()
-
-	// Close existing window for this client if open
 	if win, ok := monitorWindows[clientAddr]; ok {
 		win.Close()
 	}
+	monitorWindowsMutex.Unlock() // Unlock early before creating new window
 
-	monWin := mainApp.NewWindow(fmt.Sprintf("Monitor Management - %s", clientInfo.Hostname))
+	monWin := mainApp.NewWindow(fmt.Sprintf("Monitor Arrangement - %s", clientInfo.Hostname))
 
-	serverLabel := widget.NewLabel(formatMonitorInfo("Server", serverInfo))
-	serverLabel.Wrapping = fyne.TextWrapWord
-	clientLabel := widget.NewLabel(formatMonitorInfo("Client: "+clientAddr, clientInfo))
-	clientLabel.Wrapping = fyne.TextWrapWord
+	layoutCanvas := container.NewWithoutLayout()
+	currentLayout := make(map[string]*VirtualScreen) // Layout specific to this window
 
-	// TODO: Add drag-and-drop layout canvas later
-	layoutPlaceholder := widget.NewLabel("Drag-and-drop layout area (future)")
+	// --- Calculate Bounds and Scale ---
+	scale := float32(0.1) // Example scale factor
+	minX, minY := float32(serverInfo.Screens[0].X), float32(serverInfo.Screens[0].Y)
+	maxX, maxY := float32(serverInfo.Screens[0].X+serverInfo.Screens[0].W), float32(serverInfo.Screens[0].Y+serverInfo.Screens[0].H)
+	padding := float32(20) // Padding around the layout
 
-	content := container.NewVBox(
-		widget.NewLabel("Monitor Configuration:"),
-		widget.NewSeparator(),
-		serverLabel,
-		widget.NewSeparator(),
-		clientLabel,
-		widget.NewSeparator(),
-		layoutPlaceholder,
-	)
+	// Combine all screens to find global bounds
+	allScreens := append([]types.ScreenRect{}, serverInfo.Screens...) // Copy server screens
+	allScreens = append(allScreens, clientInfo.Screens...)            // Add client screens
 
+	for _, screen := range allScreens {
+		if float32(screen.X) < minX {
+			minX = float32(screen.X)
+		}
+		if float32(screen.Y) < minY {
+			minY = float32(screen.Y)
+		}
+		if float32(screen.X+screen.W) > maxX {
+			maxX = float32(screen.X + screen.W)
+		}
+		if float32(screen.Y+screen.H) > maxY {
+			maxY = float32(screen.Y + screen.H)
+		}
+	}
+
+	// Calculate offset to bring top-left near (padding, padding)
+	offsetX := -minX*scale + padding
+	offsetY := -minY*scale + padding
+
+	// --- Create and Place Widgets ---
+	addMonitor := func(info types.MonitorInfo, isServer bool) {
+		for _, screen := range info.Screens {
+			mw := NewMonitorWidget(screen, info.Hostname, isServer)
+
+			scaledW := float32(screen.W) * scale
+			scaledH := float32(screen.H) * scale
+			// Apply offset for normalized positioning
+			widgetX := (float32(screen.X)*scale + offsetX)
+			widgetY := (float32(screen.Y)*scale + offsetY)
+			initialPos := fyne.NewPos(widgetX, widgetY)
+			initialSize := fyne.NewSize(scaledW, scaledH)
+
+			mw.Resize(initialSize)
+			mw.Move(initialPos)
+			mw.SetOffset(initialPos) // Store initial offset relative to canvas
+
+			layoutCanvas.Add(mw)
+
+			key := screenKey(info.Hostname, screen.ID)
+			vScreen := &VirtualScreen{
+				ID:       screen.ID,
+				Hostname: info.Hostname,
+				IsServer: isServer,
+				Original: screen,
+				Widget:   mw,
+				Position: initialPos,
+				Size:     initialSize,
+			}
+			currentLayout[key] = vScreen
+
+			// Set the callback for when dragging stops
+			mw.OnDragEnd = func(draggedWidget *monitorWidget) {
+				finalOffset := draggedWidget.GetOffset()
+				currentKey := screenKey(draggedWidget.hostname, draggedWidget.screenInfo.ID)
+				fmt.Printf("Callback DragEnd %s to %v\n", currentKey, finalOffset)
+				if vScreen, ok := currentLayout[currentKey]; ok {
+					vScreen.Position = finalOffset // Update position in our map
+				}
+				// TODO: Snapping logic
+				// TODO: Save layout persistently?
+			}
+		}
+	}
+
+	addMonitor(serverInfo, true)
+	addMonitor(clientInfo, false)
+
+	// Store the initial layout for this client address
+	virtualLayoutsMutex.Lock()
+	virtualLayouts[clientAddr] = currentLayout
+	virtualLayoutsMutex.Unlock()
+
+	content := layoutCanvas
+
+	// Calculate total required size for the window based on normalized coords
+	totalWidth := (maxX-minX)*scale + 2*padding
+	totalHeight := (maxY-minY)*scale + 2*padding
 	monWin.SetContent(content)
-	monWin.Resize(fyne.NewSize(500, 400))
+	monWin.Resize(fyne.NewSize(totalWidth, totalHeight))
 
 	// Remove window from map when closed
 	monWin.SetOnClosed(func() {
 		monitorWindowsMutex.Lock()
 		delete(monitorWindows, clientAddr)
 		monitorWindowsMutex.Unlock()
+		// Also clear the virtual layout for this client when window closed?
+		virtualLayoutsMutex.Lock()
+		delete(virtualLayouts, clientAddr)
+		virtualLayoutsMutex.Unlock()
 	})
 
-	monitorWindows[clientAddr] = monWin // Store reference
+	monitorWindowsMutex.Lock() // Lock again before accessing map
+	monitorWindows[clientAddr] = monWin
+	monitorWindowsMutex.Unlock()
 	monWin.Show()
 }
 
