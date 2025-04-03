@@ -646,21 +646,25 @@ func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
 	serverHostname, _ := os.Hostname()
 
 	for _, serverScreen := range serverScreens {
-		// Log coordinates and screen bounds being checked
+		// Ensure detailed logging is active
 		log.Printf("Checking (%d,%d) against Screen %d: X[%d -> %d], Y[%d -> %d]",
 			x, y, serverScreen.ID, serverScreen.X, serverScreen.X+serverScreen.W, serverScreen.Y, serverScreen.Y+serverScreen.H)
 
-		const edgeBuffer = 2 // Keep buffer slightly increased
+		const edgeBuffer = 3 // Slightly larger buffer just in case
 		currentEdge := types.ScreenEdge("")
 
-		// Check edges with buffer
+		// Refined Edge Checks:
+		// Check Left Edge: X is near left border, Y is within vertical bounds
 		if x >= serverScreen.X && x <= serverScreen.X+edgeBuffer && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H {
 			currentEdge = types.EdgeLeft
-		} else if x >= serverScreen.X+serverScreen.W-edgeBuffer && x <= serverScreen.X+serverScreen.W+edgeBuffer && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H { // Loosened upper bound
+			// Check Right Edge: X is near right border, Y is within vertical bounds
+		} else if x <= serverScreen.X+serverScreen.W && x >= serverScreen.X+serverScreen.W-edgeBuffer && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H {
 			currentEdge = types.EdgeRight
+			// Check Top Edge: Y is near top border, X is within horizontal bounds
 		} else if y >= serverScreen.Y && y <= serverScreen.Y+edgeBuffer && x >= serverScreen.X && x < serverScreen.X+serverScreen.W {
 			currentEdge = types.EdgeTop
-		} else if y >= serverScreen.Y+serverScreen.H-edgeBuffer && y <= serverScreen.Y+serverScreen.H+edgeBuffer && x >= serverScreen.X && x < serverScreen.X+serverScreen.W { // Loosened upper bound
+			// Check Bottom Edge: Y is near bottom border, X is within horizontal bounds
+		} else if y <= serverScreen.Y+serverScreen.H && y >= serverScreen.Y+serverScreen.H-edgeBuffer && x >= serverScreen.X && x < serverScreen.X+serverScreen.W {
 			currentEdge = types.EdgeBottom
 		}
 
