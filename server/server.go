@@ -284,6 +284,136 @@ func (s *Server) captureAndTrackInput() {
 		activeAddr := s.activeClientAddr
 		s.clientsMutex.RUnlock()
 
+		// Handle keyboard shortcuts for explicit monitor switching
+		if e.Rawcode == 124 && (e.Mask&4 != 0) { // Alt+Right Arrow key (4 is ALT modifier)
+			log.Printf("SHORTCUT: Alt+Right detected - forcing transition to client")
+
+			// If we're already remote, this does nothing
+			if isRemote {
+				log.Printf("SHORTCUT: Already controlling client, ignoring Alt+Right")
+				return
+			}
+
+			// Check for any available client to switch to
+			s.clientsMutex.RLock()
+			if len(s.clients) == 0 {
+				log.Printf("SHORTCUT: No clients available to switch to")
+				s.clientsMutex.RUnlock()
+				return
+			}
+
+			// Pick first client in map (or specific one in future)
+			var targetClient *ClientConnection
+			var targetAddr string
+			for addr, client := range s.clients {
+				if client.MonitorInfo != nil {
+					targetClient = client
+					targetAddr = addr
+					break
+				}
+			}
+
+			if targetClient == nil || targetClient.MonitorInfo == nil {
+				log.Printf("SHORTCUT: No clients with monitor info available")
+				s.clientsMutex.RUnlock()
+				return
+			}
+
+			// Get monitor info for client's first screen
+			clientScreen := targetClient.MonitorInfo.Screens[0]
+			s.clientsMutex.RUnlock()
+
+			// Position cursor in center of client's first screen
+			initialClientX := clientScreen.X + clientScreen.W/2
+			initialClientY := clientScreen.Y + clientScreen.H/2
+
+			log.Printf("SHORTCUT: Switching input to client: %s at position (%d,%d)",
+				targetAddr, initialClientX, initialClientY)
+
+			// Update state
+			s.clientsMutex.Lock()
+			s.remoteInputActive = true
+			s.activeClientAddr = targetAddr
+			s.lastSentMouseX = initialClientX
+			s.lastSentMouseY = initialClientY
+			activeClient := targetClient
+			s.clientsMutex.Unlock()
+
+			// Send mouse event to position cursor
+			initMouseEvent := types.MouseEvent{
+				X:      initialClientX,
+				Y:      initialClientY,
+				Action: types.ActionMove,
+			}
+
+			err := s.sendMessage(activeClient, types.TypeMouseEvent, initMouseEvent)
+			if err != nil {
+				log.Printf("SHORTCUT: Error sending initial mouse event: %v", err)
+				s.clientsMutex.Lock()
+				s.remoteInputActive = false
+				s.activeClientAddr = ""
+				s.clientsMutex.Unlock()
+				return
+			}
+
+			// Move server cursor off-screen
+			robotgo.MoveMouse(-1, -1)
+
+			// Send a second event to ensure it's received
+			time.Sleep(10 * time.Millisecond)
+			_ = s.sendMessage(activeClient, types.TypeMouseEvent, initMouseEvent)
+
+			return
+		} else if e.Rawcode == 123 && (e.Mask&4 != 0) { // Alt+Left Arrow key (4 is ALT modifier)
+			log.Printf("SHORTCUT: Alt+Left detected - forcing transition to server")
+
+			// If we're already on server, this does nothing
+			if !isRemote {
+				log.Printf("SHORTCUT: Already controlling server, ignoring Alt+Left")
+				return
+			}
+
+			// Get client info
+			s.clientsMutex.RLock()
+			client, clientOk := s.clients[activeAddr]
+			s.clientsMutex.RUnlock()
+
+			if !clientOk || client.MonitorInfo == nil {
+				log.Printf("SHORTCUT: Active client no longer available")
+				s.clientsMutex.Lock()
+				s.remoteInputActive = false
+				s.activeClientAddr = ""
+				s.clientsMutex.Unlock()
+				return
+			}
+
+			// Get first server screen
+			serverScreens := s.GetServerScreens()
+			if len(serverScreens) == 0 {
+				log.Printf("SHORTCUT: No server screens available")
+				return
+			}
+			serverScreen := serverScreens[0]
+
+			// Position cursor in center of server's first screen
+			entryX := serverScreen.X + serverScreen.W/2
+			entryY := serverScreen.Y + serverScreen.H/2
+
+			log.Printf("SHORTCUT: Switching input back to server at position (%d,%d)",
+				entryX, entryY)
+
+			// Update state
+			s.clientsMutex.Lock()
+			s.remoteInputActive = false
+			s.activeClientAddr = ""
+			s.clientsMutex.Unlock()
+
+			// Move cursor to server screen
+			robotgo.Move(entryX, entryY)
+
+			return
+		}
+
 		if isRemote {
 			s.clientsMutex.RLock()
 			client, ok := s.clients[activeAddr]
