@@ -27,15 +27,15 @@ type DiscoveryMessage struct {
 }
 
 const (
-	DiscoveryAddr    = "239.0.0.1:9999" // Example multicast address
-	DiscoveryType    = "KB_SHARE_DISCOVERY_V1"
+	DiscoveryAddr     = "239.0.0.1:9999" // Example multicast address
+	DiscoveryType     = "KB_SHARE_DISCOVERY_V1"
 	BroadcastInterval = 5 * time.Second
 )
 
 type Server struct {
-	listener net.Listener
-	clients  []net.Conn
-	stopChan chan struct{}
+	listener      net.Listener
+	clients       []net.Conn
+	stopChan      chan struct{}
 	discoveryStop chan struct{} // Channel to stop discovery broadcast
 }
 
@@ -46,9 +46,9 @@ func NewServer(port int) (*Server, error) {
 	}
 
 	return &Server{
-		listener: listener,
-		clients:  make([]net.Conn, 0),
-		stopChan:       make(chan struct{}),
+		listener:      listener,
+		clients:       make([]net.Conn, 0),
+		stopChan:      make(chan struct{}),
 		discoveryStop: make(chan struct{}),
 	}, nil
 }
@@ -197,31 +197,54 @@ func (s *Server) startDiscoveryBroadcaster() {
 	}
 }
 
-// getLocalIP finds a non-loopback local IP address
+// getLocalIP finds a non-loopback, private local IPv4 address
 func getLocalIP() (string, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return "", err
 	}
 	for _, address := range addrs {
-		// Check the address type and if it is not a loopback
+		// Check the address type and if it is not a loopback and is private
 		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
+			if ipnet.IP.To4() != nil && ipnet.IP.IsPrivate() { // Check if it's IPv4 and Private
 				return ipnet.IP.String(), nil
 			}
 		}
 	}
-	// Attempt to get hostname IP if interface method fails
+	// Fallback: Try hostname lookup if interface method fails to find a private IP
 	hostname, err := os.Hostname()
 	if err == nil {
 		ips, err := net.LookupIP(hostname)
 		if err == nil {
 			for _, ip := range ips {
-				if ip.To4() != nil && !ip.IsLoopback() {
+				if ip.To4() != nil && !ip.IsLoopback() && ip.IsPrivate() {
 					return ip.String(), nil
 				}
 			}
 		}
 	}
-	return "", fmt.Errorf("cannot find suitable local IP address")
-} 
+	return "", fmt.Errorf("cannot find suitable private local IP address")
+}
+
+// GetListenIP returns the determined local IP address used for discovery.
+// It might return "UNKNOWN" if an IP couldn't be determined.
+func (s *Server) GetListenIP() string {
+	ip, err := getLocalIP()
+	if err != nil {
+		// Consistent with discovery broadcaster's fallback
+		return "UNKNOWN"
+	}
+	return ip
+}
+
+// GetListenPort returns the actual port the server is listening on.
+func (s *Server) GetListenPort() int {
+	// Check if listener is valid and is a TCPAddr
+	if s.listener != nil {
+		if tcpAddr, ok := s.listener.Addr().(*net.TCPAddr); ok {
+			return tcpAddr.Port
+		}
+	}
+	// Return a default/error indicator if port cannot be determined
+	return -1
+}

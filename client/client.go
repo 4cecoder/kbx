@@ -32,34 +32,56 @@ const (
 type Client struct {
 	conn            net.Conn
 	stopChan        chan struct{}
-	discoveryStop   chan struct{} // Channel to stop discovery listener
+	discoveryStop   chan struct{}               // Channel to stop discovery listener
 	foundServers    map[string]DiscoveryMessage // Map to store found servers [ip:port] -> message
+	connectedServer DiscoveryMessage            // Store info about the server we connected to
 }
 
-func NewClient(serverAddr string) (*Client, error) {
-	conn, err := net.Dial("tcp", serverAddr)
-	if err != nil {
-		return nil, err
+// NewClient creates a client instance but doesn't connect yet.
+// It primarily initializes structures needed for discovery.
+func NewClient() *Client {
+	return &Client{
+		conn:          nil, // Connection established later
+		stopChan:      make(chan struct{}),
+		discoveryStop: make(chan struct{}),
+		foundServers:  make(map[string]DiscoveryMessage),
+	}
+}
+
+// Connect dials the specified server address.
+func (c *Client) Connect(serverAddr string) error {
+	// Close existing connection if any
+	if c.conn != nil {
+		c.conn.Close()
 	}
 
-	return &Client{
-		conn:            conn,
-		stopChan:        make(chan struct{}),
-		discoveryStop:   make(chan struct{}),
-		foundServers:    make(map[string]DiscoveryMessage),
-	}, nil
-}
+	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second) // Add timeout
+	if err != nil {
+		return err
+	}
+	c.conn = conn
 
-func (c *Client) Start() {
+	// If we found this server via discovery, store its info
+	if serverInfo, ok := c.foundServers[serverAddr]; ok {
+		c.connectedServer = serverInfo
+	} else {
+		// TODO: Maybe implement a handshake to get server info if connected manually?
+		c.connectedServer = DiscoveryMessage{ServerIP: serverAddr, Hostname: "Manual Connection"} // Placeholder
+	}
+
 	go c.receiveEvents()
+	return nil
 }
 
 func (c *Client) Stop() {
-	close(c.stopChan)
+	close(c.stopChan)      // Signal receiver to stop
 	close(c.discoveryStop) // Signal discovery listener to stop
-	if c.conn != nil {      // Check if conn was initialized
+	if c.conn != nil {     // Check if conn was initialized
 		c.conn.Close()
+		c.conn = nil // Ensure connection is marked as closed
 	}
+	// Clear found servers maybe? Or keep them for next time?
+	// c.foundServers = make(map[string]DiscoveryMessage)
 }
 
 func (c *Client) receiveEvents() {
@@ -149,5 +171,12 @@ func (c *Client) StartDiscoveryListener() {
 
 // GetFoundServers returns the list of discovered servers
 func (c *Client) GetFoundServers() map[string]DiscoveryMessage {
+	// Return a copy to avoid race conditions if UI modifies it?
+	// For now, direct access is simpler but be mindful.
 	return c.foundServers
-} 
+}
+
+// GetConnectedServerInfo returns info about the server we are connected to.
+func (c *Client) GetConnectedServerInfo() DiscoveryMessage {
+	return c.connectedServer
+}
