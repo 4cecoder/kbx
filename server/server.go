@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -25,6 +26,21 @@ const (
 	DiscoveryType     = "KB_SHARE_DISCOVERY_V1" // Use string literal here
 	BroadcastInterval = 5 * time.Second
 )
+
+// Setup file logging
+func init() {
+	// Open log file
+	logFile, err := os.OpenFile("kb_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Printf("Failed to open log file: %v", err)
+		return
+	}
+
+	// Use MultiWriter to write to both console and file
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(multiWriter)
+	log.Println("Starting application with file logging enabled")
+}
 
 type ClientConnection struct {
 	Conn        net.Conn
@@ -298,8 +314,8 @@ func (s *Server) captureAndTrackInput() {
 		// Try multiple keyboard combinations
 		if (e.Rawcode == 124 && ((e.Mask&4 != 0) || (e.Mask&8 != 0))) || // Right Arrow + (Alt or Cmd)
 			(e.Rawcode == 48 && (e.Mask&8 != 0)) || // Tab key (48) + Cmd (8)
-			e.Rawcode == 122 { // F1 key (122) - no modifier needed
-			log.Printf("SHORTCUT: Detected shortcut (code %d) - forcing transition to client", e.Rawcode)
+			e.Rawcode == 122 || e.Rawcode == 0x7A { // F1 key - use both decimal (122) and hex (0x7A)
+			log.Printf("SHORTCUT: Detected F1 shortcut (code %d) - forcing transition to client", e.Rawcode)
 
 			// If we're already remote, this does nothing
 			if isRemote {
@@ -379,8 +395,8 @@ func (s *Server) captureAndTrackInput() {
 			return
 		} else if (e.Rawcode == 123 && ((e.Mask&4 != 0) || (e.Mask&8 != 0))) || // Left Arrow + (Alt or Cmd)
 			(e.Rawcode == 50 && (e.Mask&8 != 0)) || // Backtick key (50) + Cmd (8)
-			e.Rawcode == 120 { // F2 key (120) - no modifier needed
-			log.Printf("SHORTCUT: Detected shortcut (code %d) - forcing transition to server", e.Rawcode)
+			e.Rawcode == 120 || e.Rawcode == 0x78 { // F2 key - use both decimal (120) and hex (0x78)
+			log.Printf("SHORTCUT: Detected F2 shortcut (code %d) - forcing transition to server", e.Rawcode)
 
 			// If we're already on server, this does nothing
 			if !isRemote {
