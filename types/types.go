@@ -1,5 +1,7 @@
 package types
 
+import "fmt"
+
 // ScreenRect holds information about a single screen
 type ScreenRect struct {
 	ID int `json:"id"`
@@ -32,6 +34,37 @@ type DiscoveryMessage struct {
 	Hostname string `json:"hostname"`
 }
 
+// MouseEvent represents a mouse action
+type MouseEvent struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+	// Add other fields later: Button (left, right, middle), Action (click, down, up), ScrollX, ScrollY
+}
+
+// VirtualScreen represents a screen in the combined virtual layout
+// Used by the UI and potentially the server logic for edge detection
+type VirtualScreen struct {
+	ID       int        `json:"id"`
+	Hostname string     `json:"hostname"`
+	IsServer bool       `json:"is_server"`
+	Original ScreenRect `json:"original"` // Original dimensions/coords
+	// Widget field removed - specific to UI, not a shared type
+	Position Position `json:"position"` // Current position in the layout window (scaled)
+	Size     Size     `json:"size"`     // Current size in the layout window (scaled)
+}
+
+// Position defines simple X, Y (needed by VirtualScreen if fyne types aren't used here)
+type Position struct {
+	X float32 `json:"x"`
+	Y float32 `json:"y"`
+}
+
+// Size defines simple W, H (needed by VirtualScreen if fyne types aren't used here)
+type Size struct {
+	Width  float32 `json:"width"`
+	Height float32 `json:"height"`
+}
+
 // MessageType differentiates messages sent over TCP
 type MessageType string
 
@@ -39,6 +72,7 @@ const (
 	DiscoveryType               = "KB_SHARE_DISCOVERY_V1"
 	TypeKeyEvent    MessageType = "key_event"
 	TypeMonitorInfo MessageType = "monitor_info"
+	TypeMouseEvent  MessageType = "mouse_event"
 	// Add other types later if needed (e.g., mouse events, config updates)
 )
 
@@ -46,4 +80,9 @@ const (
 type WrappedMessage struct {
 	Type    MessageType `json:"type"`
 	Payload interface{} `json:"payload"` // Can be KeyEvent, MonitorInfo, etc.
+}
+
+// Helper to create a unique key for a screen
+func ScreenKey(hostname string, screenID int) string {
+	return fmt.Sprintf("%s-%d", hostname, screenID)
 }

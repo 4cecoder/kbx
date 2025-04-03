@@ -44,8 +44,6 @@ type AppUI struct {
 
 	monitorWindows    map[string]fyne.Window
 	monitorWindowsMtx sync.Mutex
-	virtualLayouts    map[string]map[string]*VirtualScreen
-	virtualLayoutsMtx sync.Mutex
 }
 
 // NewAppUI creates a new UI application instance
@@ -55,7 +53,6 @@ func NewAppUI(app fyne.App, cli *client.Client) *AppUI {
 		client:         cli,
 		server:         nil,
 		monitorWindows: make(map[string]fyne.Window),
-		virtualLayouts: make(map[string]map[string]*VirtualScreen),
 	}
 }
 
@@ -63,13 +60,8 @@ func NewAppUI(app fyne.App, cli *client.Client) *AppUI {
 func (a *AppUI) Run() {
 	a.mainWin = a.fyneApp.NewWindow("Keyboard Sharing")
 	a.mainWin.SetContent(a.createMainContent())
-	a.mainWin.Resize(fyne.NewSize(400, 300))
+	a.mainWin.Resize(fyne.NewSize(600, 400))
 	a.mainWin.ShowAndRun()
-}
-
-// Helper to create a unique key for a screen
-func screenKey(hostname string, screenID int) string {
-	return fmt.Sprintf("%s-%d", hostname, screenID)
 }
 
 // getLocalMonitorInfo helper
@@ -170,9 +162,6 @@ func (a *AppUI) startServerUI() {
 			}
 			a.monitorWindows = make(map[string]fyne.Window) // Clear map
 			a.monitorWindowsMtx.Unlock()
-			a.virtualLayoutsMtx.Lock()
-			a.virtualLayouts = make(map[string]map[string]*VirtualScreen)
-			a.virtualLayoutsMtx.Unlock()
 			a.mainWin.SetContent(a.createMainContent())
 		}
 	})
@@ -331,41 +320,37 @@ func (a *AppUI) showClientStatusScreen() {
 	a.mainWin.SetContent(content)
 }
 
-// showMonitorManagementWindow creates and shows a new window displaying draggable monitors
+// showMonitorManagementWindow requires AppUI to access the server
 func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.MonitorInfo, clientInfo types.MonitorInfo) {
 	a.monitorWindowsMtx.Lock()
 	if win, ok := a.monitorWindows[clientAddr]; ok {
 		win.Close()
 	}
 	a.monitorWindowsMtx.Unlock()
-
 	monWin := a.fyneApp.NewWindow(fmt.Sprintf("Monitor Arrangement - %s", clientInfo.Hostname))
 
 	layoutCanvas := container.NewWithoutLayout()
-	currentLayout := make(map[string]*VirtualScreen)
+	// Store layout locally for this window instance, but update server on drag end
+	windowLayout := make(map[string]*types.VirtualScreen)
 
 	scale := float32(0.1)
 	padding := float32(20)
 	minX, minY, maxX, maxY := float32(0), float32(0), float32(0), float32(0)
-	// Initial bounds check needs at least one screen
 	if len(serverInfo.Screens) > 0 {
 		minX, minY = float32(serverInfo.Screens[0].X), float32(serverInfo.Screens[0].Y)
 		maxX, maxY = float32(serverInfo.Screens[0].X+serverInfo.Screens[0].W), float32(serverInfo.Screens[0].Y+serverInfo.Screens[0].H)
-	} else if len(clientInfo.Screens) > 0 { // Use client if server has none
+	} else if len(clientInfo.Screens) > 0 {
 		minX, minY = float32(clientInfo.Screens[0].X), float32(clientInfo.Screens[0].Y)
 		maxX, maxY = float32(clientInfo.Screens[0].X+clientInfo.Screens[0].W), float32(clientInfo.Screens[0].Y+clientInfo.Screens[0].H)
 	} else {
-		// No screens reported? Handle error or show empty window
 		log.Println("Warning: No screen info available for monitor management window for", clientAddr)
 		monWin.SetContent(widget.NewLabel("No screen information received from server or client."))
 		monWin.Resize(fyne.NewSize(300, 100))
 		monWin.Show()
 		return
 	}
-
 	allScreens := append([]types.ScreenRect{}, serverInfo.Screens...)
 	allScreens = append(allScreens, clientInfo.Screens...)
-
 	for _, screen := range allScreens {
 		if float32(screen.X) < minX {
 			minX = float32(screen.X)
@@ -380,14 +365,12 @@ func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.
 			maxY = float32(screen.Y + screen.H)
 		}
 	}
-
 	offsetX := -minX*scale + padding
 	offsetY := -minY*scale + padding
 
 	addMonitor := func(info types.MonitorInfo, isServer bool) {
 		for _, screen := range info.Screens {
 			mw := NewMonitorWidget(screen, info.Hostname, isServer)
-
 			scaledW := float32(screen.W) * scale
 			scaledH := float32(screen.H) * scale
 			widgetX := (float32(screen.X)*scale + offsetX)
@@ -396,39 +379,37 @@ func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.
 			initialSize := fyne.NewSize(scaledW, scaledH)
 
 			mw.Resize(initialSize)
-			mw.SetOffset(initialPos) // Use SetOffset which also Moves
-
+			mw.SetOffset(initialPos)
 			layoutCanvas.Add(mw)
 
-			key := screenKey(info.Hostname, screen.ID)
-			vScreen := &VirtualScreen{
+			key := types.ScreenKey(info.Hostname, screen.ID)
+			vScreen := &types.VirtualScreen{
 				ID:       screen.ID,
 				Hostname: info.Hostname,
 				IsServer: isServer,
 				Original: screen,
-				Widget:   mw,
-				Position: initialPos,
-				Size:     initialSize,
+				Position: types.Position{X: initialPos.X, Y: initialPos.Y},
+				Size:     types.Size{Width: initialSize.Width, Height: initialSize.Height},
 			}
-			currentLayout[key] = vScreen
+			windowLayout[key] = vScreen
 
 			mw.OnDragEnd = func(draggedWidget *monitorWidget) {
 				finalOffset := draggedWidget.GetOffset()
-				currentKey := screenKey(draggedWidget.hostname, draggedWidget.screenInfo.ID)
+				currentKey := types.ScreenKey(draggedWidget.hostname, draggedWidget.screenInfo.ID)
 				log.Printf("Callback DragEnd %s to %v\n", currentKey, finalOffset)
-				a.virtualLayoutsMtx.Lock()
-				if clientLayout, ok := a.virtualLayouts[clientAddr]; ok {
-					if vScreen, ok := clientLayout[currentKey]; ok {
-						vScreen.Position = finalOffset // Update position in shared map
-					}
-				} else {
-					// Initialize map if it doesn't exist (shouldn't happen often here)
-					a.virtualLayouts[clientAddr] = make(map[string]*VirtualScreen)
-					// Try updating again? Or log error?
+
+				// Update the local window layout first
+				if vScreen, ok := windowLayout[currentKey]; ok {
+					vScreen.Position = types.Position{X: finalOffset.X, Y: finalOffset.Y}
 				}
-				a.virtualLayoutsMtx.Unlock()
+
+				// Now, update the server's master layout for this client
+				if a.server != nil {
+					a.server.UpdateLayout(clientAddr, windowLayout)
+				} else {
+					log.Println("Error: Server is nil, cannot update layout.")
+				}
 				// TODO: Snapping logic
-				// TODO: Save layout persistently?
 			}
 		}
 	}
@@ -436,33 +417,29 @@ func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.
 	addMonitor(serverInfo, true)
 	addMonitor(clientInfo, false)
 
-	a.virtualLayoutsMtx.Lock()
-	a.virtualLayouts[clientAddr] = currentLayout // Store initial layout
-	a.virtualLayoutsMtx.Unlock()
+	// Update the server's master layout with the initial state
+	if a.server != nil {
+		a.server.UpdateLayout(clientAddr, windowLayout)
+	}
 
 	content := layoutCanvas
-
 	totalWidth := (maxX-minX)*scale + 2*padding
 	totalHeight := (maxY-minY)*scale + 2*padding
 	monWin.SetContent(content)
 	monWin.Resize(fyne.NewSize(totalWidth, totalHeight))
-
 	monWin.SetOnClosed(func() {
 		a.monitorWindowsMtx.Lock()
 		delete(a.monitorWindows, clientAddr)
 		a.monitorWindowsMtx.Unlock()
-		a.virtualLayoutsMtx.Lock()
-		delete(a.virtualLayouts, clientAddr)
-		a.virtualLayoutsMtx.Unlock()
+		// Don't delete server layout here, it should persist until client disconnects
 	})
-
 	a.monitorWindowsMtx.Lock()
 	a.monitorWindows[clientAddr] = monWin
 	a.monitorWindowsMtx.Unlock()
 	monWin.Show()
 }
 
-// serverUIUpdater listens for client updates from the server and launches UI windows
+// serverUIUpdater passes the AppUI instance to showMonitorManagementWindow
 func (a *AppUI) serverUIUpdater() {
 	if a.server == nil || a.server.ClientUpdateChan == nil {
 		log.Println("Server or ClientUpdateChan is nil, cannot start UI updater.")
@@ -470,19 +447,15 @@ func (a *AppUI) serverUIUpdater() {
 	}
 	log.Println("Starting Server UI Updater...")
 	serverMonitorInfo := getLocalMonitorInfo()
-
 	for clientConn := range a.server.ClientUpdateChan {
 		if clientConn != nil && clientConn.MonitorInfo != nil {
 			clientAddr := clientConn.Conn.RemoteAddr().String()
 			log.Printf("UI Updater: Received monitor info for %s\n", clientAddr)
 			clientInfoCopy := *clientConn.MonitorInfo
-			// Launch window creation in a goroutine to avoid blocking the update channel reader
-			// Note: Fyne UI operations *should* ideally happen on the main thread.
-			// If creating windows from goroutines causes issues (crashes, visual glitches),
-			// this needs refactoring to use fyneApp.SendNotification or a channel back to the main loop.
-			go func(addr string, serverInfo types.MonitorInfo, clientInfo types.MonitorInfo) {
-				a.showMonitorManagementWindow(addr, serverInfo, clientInfo)
-			}(clientAddr, serverMonitorInfo, clientInfoCopy)
+			// Pass AppUI instance 'a' so the window can call a.server.UpdateLayout
+			go func(appUI *AppUI, addr string, serverInfo types.MonitorInfo, clientInfo types.MonitorInfo) {
+				appUI.showMonitorManagementWindow(addr, serverInfo, clientInfo)
+			}(a, clientAddr, serverMonitorInfo, clientInfoCopy)
 		}
 	}
 	log.Println("Server UI Updater finished.")
