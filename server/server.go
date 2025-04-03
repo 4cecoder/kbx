@@ -516,6 +516,7 @@ func (s *Server) captureAndTrackInput() {
 			return
 		case <-evChan:
 			// Events are handled by registered callbacks
+			// log.Printf("Received event on evChan (type %T)", e) // Uncomment for basic channel check
 		}
 	}
 }
