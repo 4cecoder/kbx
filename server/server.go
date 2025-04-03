@@ -105,11 +105,11 @@ func (s *Server) sendMessage(client *ClientConnection, msgType types.MessageType
 	return client.Encoder.Encode(wrappedMsg)
 }
 
+// Start begins the server's operations: accepting connections and capturing input.
 func (s *Server) Start() {
 	go s.acceptConnections()
-	go s.captureKeyboard()
 	go s.startDiscoveryBroadcaster()
-	go s.trackMouseInput() // Start mouse tracking
+	go s.captureAndTrackInput() // Combined input handler
 }
 
 func (s *Server) Stop() {
@@ -236,87 +236,284 @@ func (s *Server) removeClient(addr string) {
 	s.clientsMutex.Unlock()
 }
 
-func (s *Server) captureKeyboard() {
-	log.Println("Starting keyboard capture...")
+// captureAndTrackInput captures keyboard and mouse events and handles redirection.
+func (s *Server) captureAndTrackInput() {
+	log.Println("Starting unified input capture...")
 	evChan := hook.Start()
 	// Check for Accessibility permission error specifically on macOS
 	if runtime.GOOS == "darwin" {
-		// A bit hacky: check if the event channel is nil after Start()
-		// gohook doesn't seem to return a specific error for permissions,
-		// but often fails to initialize the channel.
-		// Also check for the known log message text if possible (though fragile).
-		// We'll primarily rely on the channel being nil or closed immediately.
-		_, chanOpen := <-evChan // Non-blocking read to check if closed
-		if !chanOpen {
-			log.Println("Warning: hook.Start() failed, likely missing macOS Accessibility permissions.")
+		permissionOk := true // Assume OK initially
+		if evChan == nil {
+			log.Println("Warning: hook.Start() returned nil channel, likely missing macOS Accessibility permissions.")
+			permissionOk = false
+		} else {
+			// Check if channel is immediately closed (non-blocking)
+			select {
+			case _, ok := <-evChan:
+				if !ok { // Channel is closed
+					log.Println("Warning: Event channel closed unexpectedly, likely missing macOS Accessibility permissions.")
+					permissionOk = false
+				} else {
+					// Received an event immediately? This is odd, but maybe not a permission error.
+					log.Println("Warning: Unexpected event received immediately after hook start.")
+					// We could potentially try putting the event back on a buffered channel
+					// but let's assume it's not fatal for now.
+				}
+			default:
+				// Channel is open and no immediate event, likely OK.
+			}
+		}
+
+		if !permissionOk {
+			// Send warning to UI only if a problem was detected
 			select {
 			case s.WarningChan <- "macOS Accessibility permission likely missing.":
-			default: // Avoid blocking if channel is full/closed
+			default:
 			}
-			// Don't return here; allow hook registration attempt even if check was flaky.
-			// If permissions are actually granted, registration should succeed.
-			// return
 		}
+		// Proceed regardless of the warning, allow hook registration attempt.
 	}
 	defer hook.End()
 
-	log.Println("Keyboard capture hook started successfully.")
+	log.Println("Input capture hook started successfully.")
 
+	// --- Register Keyboard Hooks (Signature: func(e hook.Event)) ---
 	hook.Register(hook.KeyDown, []string{}, func(e hook.Event) {
 		s.clientsMutex.RLock()
 		isRemote := s.remoteInputActive
 		activeAddr := s.activeClientAddr
-		client, clientExists := s.clients[activeAddr]
 		s.clientsMutex.RUnlock()
 
-		if isRemote && clientExists { // Only process if input is remote and client exists
-			fmt.Printf("[Remote] KeyDown: %s -> %s\n", e.Keychar, activeAddr)
-			event := types.KeyEvent{
-				Type:    "keydown",
-				Keychar: string(e.Keychar),
+		if isRemote {
+			s.clientsMutex.RLock()
+			client, ok := s.clients[activeAddr]
+			s.clientsMutex.RUnlock()
+			if ok {
+				keyEvent := types.KeyEvent{Type: "keydown", Keychar: string(e.Keychar)}
+				err := s.sendMessage(client, types.TypeKeyEvent, keyEvent)
+				if err != nil {
+					log.Printf("Error sending keydown event to client %s: %v. Removing client.\n", activeAddr, err)
+					go s.removeClient(activeAddr)
+				}
+			} else {
+				log.Printf("Keydown: Active client %s not found.", activeAddr)
 			}
-			// Send only to the active client
-			err := s.sendMessage(client, types.TypeKeyEvent, event)
-			if err != nil {
-				fmt.Printf("Error sending key event to active client %s: %v. Removing client.\n", activeAddr, err)
-				go s.removeClient(activeAddr) // Schedule removal
-			}
-			// TODO: Should we suppress the local event somehow?
-			// hook.StopPropagation() // - Check gohook docs if needed/possible
-		} else {
-			// fmt.Printf("[Local] KeyDown: %s\n", e.Keychar) // Optional debug
+			// Cannot block event propagation here.
 		}
 	})
-
 	hook.Register(hook.KeyUp, []string{}, func(e hook.Event) {
 		s.clientsMutex.RLock()
 		isRemote := s.remoteInputActive
 		activeAddr := s.activeClientAddr
-		client, clientExists := s.clients[activeAddr]
 		s.clientsMutex.RUnlock()
 
-		if isRemote && clientExists { // Only process if input is remote and client exists
-			fmt.Printf("[Remote] KeyUp: %s -> %s\n", e.Keychar, activeAddr)
-			event := types.KeyEvent{
-				Type:    "keyup",
-				Keychar: string(e.Keychar),
+		if isRemote {
+			s.clientsMutex.RLock()
+			client, ok := s.clients[activeAddr]
+			s.clientsMutex.RUnlock()
+			if ok {
+				keyEvent := types.KeyEvent{Type: "keyup", Keychar: string(e.Keychar)}
+				err := s.sendMessage(client, types.TypeKeyEvent, keyEvent)
+				if err != nil {
+					log.Printf("Error sending keyup event to client %s: %v. Removing client.\n", activeAddr, err)
+					go s.removeClient(activeAddr)
+				}
+			} else {
+				log.Printf("Keyup: Active client %s not found.", activeAddr)
 			}
-			err := s.sendMessage(client, types.TypeKeyEvent, event)
-			if err != nil {
-				fmt.Printf("Error sending key event to active client %s: %v. Removing client.\n", activeAddr, err)
-				go s.removeClient(activeAddr)
-			}
-		} else {
-			// fmt.Printf("[Local] KeyUp: %s\n", e.Keychar)
+			// Cannot block event propagation here.
 		}
 	})
 
+	// --- Register Mouse Hook (Signature: func(e hook.Event)) ---
+	hook.Register(hook.MouseMove, []string{}, func(e hook.Event) {
+		x := int(e.X)
+		y := int(e.Y)
+
+		s.clientsMutex.RLock()
+		isRemote := s.remoteInputActive
+		activeAddr := s.activeClientAddr
+		s.clientsMutex.RUnlock()
+
+		if isRemote {
+			// --- Currently controlling remote client ---
+			switchToServer, targetServerScreen, targetServerEdge := s.checkReturnTransition(x, y, activeAddr) // Check using current event coords
+
+			if switchToServer {
+				log.Printf("Switching input back to server from %s\n", activeAddr)
+				s.clientsMutex.RLock()
+				client, clientOk := s.clients[activeAddr]
+				clientInfo := client.MonitorInfo // Can be nil if client disconnected quickly
+				lastX := s.lastSentMouseX        // Use *last sent* coords to determine exit edge
+				lastY := s.lastSentMouseY
+				s.clientsMutex.RUnlock()
+
+				var entryX, entryY int
+				calculatedEntry := false
+
+				if clientOk && clientInfo != nil {
+					// Try to calculate entry point properly
+					var sourceClientScreen types.ScreenRect
+					var sourceClientEdge types.ScreenEdge = "" // Initialize as undetermined
+					foundSourceScreen := false
+					const returnEdgeBuffer = 2
+					for _, cs := range clientInfo.Screens {
+						if lastX >= cs.X && lastX < cs.X+cs.W && lastY >= cs.Y && lastY < cs.Y+cs.H {
+							sourceClientScreen = cs
+							foundSourceScreen = true
+							// Determine edge based on last coords relative to this screen
+							if lastX <= cs.X+returnEdgeBuffer {
+								sourceClientEdge = types.EdgeLeft
+							} else if lastX >= cs.X+cs.W-returnEdgeBuffer {
+								sourceClientEdge = types.EdgeRight
+							} else if lastY <= cs.Y+returnEdgeBuffer {
+								sourceClientEdge = types.EdgeTop
+							} else if lastY >= cs.Y+cs.H-returnEdgeBuffer {
+								sourceClientEdge = types.EdgeBottom
+							}
+							break // Break after determining edge or finding the screen
+						}
+					}
+
+					if foundSourceScreen && sourceClientEdge != "" {
+						entryX, entryY = calculateEntryPoint(lastX, lastY, sourceClientScreen, sourceClientEdge, targetServerScreen, targetServerEdge)
+						calculatedEntry = true
+					} else {
+						log.Printf("Warning: Could not determine client exit screen/edge from last coords (%d, %d). Using rough estimate.", lastX, lastY)
+					}
+				} else {
+					log.Println("Cannot calculate return point: Client disconnected or missing info.")
+				}
+
+				if !calculatedEntry {
+					// Fallback: Use the target edge to guess entry point or default to center
+					entryX, entryY = targetServerScreen.X+targetServerScreen.W/2, targetServerScreen.Y+targetServerScreen.H/2
+					if targetServerEdge == types.EdgeLeft {
+						entryX = targetServerScreen.X + 3
+					} else if targetServerEdge == types.EdgeRight {
+						entryX = targetServerScreen.X + targetServerScreen.W - 3
+					} else if targetServerEdge == types.EdgeTop {
+						entryY = targetServerScreen.Y + 3
+					} else if targetServerEdge == types.EdgeBottom {
+						entryY = targetServerScreen.Y + targetServerScreen.H - 3
+					}
+				}
+
+				// Update state *after* all calculations
+				s.clientsMutex.Lock()
+				s.remoteInputActive = false
+				s.activeClientAddr = ""
+				s.clientsMutex.Unlock()
+
+				// Move cursor *after* releasing lock
+				robotgo.Move(entryX, entryY)
+
+			} else { // Still controlling remote client
+				s.clientsMutex.RLock()
+				client, ok := s.clients[activeAddr]
+				s.clientsMutex.RUnlock()
+				if !ok {
+					log.Printf("MouseMove: Active client %s not found. Reverting to local.", activeAddr)
+					s.clientsMutex.Lock()
+					s.remoteInputActive = false
+					s.activeClientAddr = ""
+					s.clientsMutex.Unlock()
+					return // Exit callback
+				}
+
+				// Send mouse event
+				mouseEvent := types.MouseEvent{X: x, Y: y}
+				s.clientsMutex.Lock()
+				s.lastSentMouseX = x
+				s.lastSentMouseY = y
+				s.clientsMutex.Unlock() // Release lock before sending potentially blocking network call
+
+				err := s.sendMessage(client, types.TypeMouseEvent, mouseEvent)
+				if err != nil {
+					log.Printf("Error sending mouse event to client %s: %v. Removing client.\n", activeAddr, err)
+					go s.removeClient(activeAddr)
+				}
+				// Keep server cursor off-screen
+				robotgo.MoveMouse(-1, -1)
+			}
+
+		} else {
+			// --- Currently controlling local server ---
+			switchToClient, targetClientAddr, targetLink := s.checkEdgeTransition(x, y)
+
+			if switchToClient {
+				log.Printf("Switching input to client: %s\n", targetClientAddr)
+				// --- (Find source/target screens and calculate entry point) ---
+				var sourceScreen types.ScreenRect
+				for _, ss := range s.GetServerScreens() {
+					if ss.ID == targetLink.FromScreenID {
+						sourceScreen = ss
+						break
+					}
+				}
+				s.clientsMutex.RLock()
+				targetClientConn, targetClientOk := s.clients[targetClientAddr]
+				s.clientsMutex.RUnlock()
+				if !targetClientOk || targetClientConn.MonitorInfo == nil {
+					log.Printf("Cannot switch: Target client %s disconnected or has no monitor info.\n", targetClientAddr)
+					return // Exit callback
+				}
+				var targetClientScreen types.ScreenRect
+				for _, cs := range targetClientConn.MonitorInfo.Screens {
+					if cs.ID == targetLink.ToScreenID {
+						targetClientScreen = cs
+						break
+					}
+				}
+				if targetClientScreen.W == 0 {
+					log.Printf("Cannot switch: Target client screen ID %d not found.\n", targetLink.ToScreenID)
+					return // Exit callback
+				}
+				initialClientX, initialClientY := calculateEntryPoint(x, y, sourceScreen, targetLink.FromEdge, targetClientScreen, targetLink.ToEdge)
+
+				// Update state and send initial message
+				s.clientsMutex.Lock()
+				s.remoteInputActive = true
+				s.activeClientAddr = targetClientAddr
+				s.lastSentMouseX = initialClientX
+				s.lastSentMouseY = initialClientY
+				activeClient, stillExists := s.clients[targetClientAddr]
+				if !stillExists {
+					log.Printf("Target client %s disconnected before input switch could complete.", targetClientAddr)
+					s.remoteInputActive = false
+					s.activeClientAddr = ""
+					s.clientsMutex.Unlock()
+					return // Exit callback
+				}
+				// Send initial message *before* unlocking mutex?
+				initMouseEvent := types.MouseEvent{X: initialClientX, Y: initialClientY}
+				err := s.sendMessage(activeClient, types.TypeMouseEvent, initMouseEvent)
+				if err != nil {
+					log.Printf("Error sending initial mouse event to client %s: %v. Reverting switch.\n", targetClientAddr, err)
+					s.remoteInputActive = false
+					s.activeClientAddr = ""
+					// Unlock before removing client
+					s.clientsMutex.Unlock()
+					go s.removeClient(targetClientAddr)
+					return // Exit callback
+				}
+				s.clientsMutex.Unlock() // Unlock after successful initial send
+
+				// Move server cursor off-screen after switching
+				robotgo.MoveMouse(-1, -1)
+			}
+			// If local and no switch happened, do nothing (allow OS handle)
+		}
+	})
+
+	// --- Main Event Loop ---
 	for {
 		select {
 		case <-s.stopChan:
+			log.Println("Stopping input capture loop.")
 			return
 		case <-evChan:
-			// We handle events via the registered callbacks now
+			// Events are handled by registered callbacks
 		}
 	}
 }
@@ -619,136 +816,6 @@ func calculateEntryPoint(sourceX, sourceY int, sourceScreen types.ScreenRect, so
 	targetY = max(targetScreen.Y, min(targetY, targetScreen.Y+targetScreen.H-1))
 
 	return targetX, targetY
-}
-
-func (s *Server) trackMouseInput() {
-	log.Println("Starting mouse input tracking...")
-	defer log.Println("Stopping mouse input tracking.")
-
-	for {
-		select {
-		case <-s.stopChan:
-			return
-		default:
-			s.clientsMutex.RLock()
-			isRemote := s.remoteInputActive
-			activeAddr := s.activeClientAddr
-			client, clientExists := s.clients[activeAddr]
-			lastX := s.lastSentMouseX
-			lastY := s.lastSentMouseY
-			s.clientsMutex.RUnlock()
-
-			x, y := robotgo.Location()
-
-			if isRemote && clientExists {
-				// --- Currently controlling remote client ---
-				switchToServer, targetServerScreen, targetServerEdge := s.checkReturnTransition(lastX, lastY, activeAddr)
-
-				if switchToServer {
-					log.Println("Switching input back to server.")
-					entryX, entryY := calculateEntryPoint(lastX, lastY,
-						client.MonitorInfo.Screens[0], /* TODO: Find correct client screen */
-						"unknown",                     /* TODO: Need client exit edge from link */
-						targetServerScreen, targetServerEdge)
-
-					s.clientsMutex.Lock()
-					s.remoteInputActive = false
-					s.activeClientAddr = ""
-					s.clientsMutex.Unlock()
-
-					robotgo.Move(entryX, entryY) // Move server cursor to entry point
-					continue                     // Skip sending this event to client
-				}
-
-				// Send mouse event (use current physical server coords for now)
-				// TODO: Consider if client needs relative or absolute coords?
-				mouseEvent := types.MouseEvent{X: x, Y: y}
-				s.clientsMutex.Lock() // Lock needed to update last sent coords
-				s.lastSentMouseX = x
-				s.lastSentMouseY = y
-				s.clientsMutex.Unlock()
-
-				// Actively keep server cursor off-screen while controlling client
-				robotgo.MoveMouse(-1, -1)
-
-				err := s.sendMessage(client, types.TypeMouseEvent, mouseEvent)
-				if err != nil {
-					log.Printf("Error sending mouse event to client %s: %v. Removing client.\n", activeAddr, err)
-					go s.removeClient(activeAddr)
-				}
-			} else {
-				// --- Currently controlling local server ---
-				switchToClient, targetClientAddr, targetLink := s.checkEdgeTransition(x, y)
-
-				if switchToClient {
-					log.Printf("Switching input to client: %s\n", targetClientAddr)
-
-					// Find the server screen that was exited
-					var sourceScreen types.ScreenRect
-					for _, ss := range s.GetServerScreens() {
-						if ss.ID == targetLink.FromScreenID {
-							sourceScreen = ss
-							break
-						}
-					}
-
-					// Find the target client screen details
-					s.clientsMutex.RLock()
-					targetClientConn, targetClientOk := s.clients[targetClientAddr]
-					s.clientsMutex.RUnlock()
-					if !targetClientOk || targetClientConn.MonitorInfo == nil {
-						log.Printf("Cannot switch: Target client %s disconnected or has no monitor info.\n", targetClientAddr)
-						continue
-					}
-					var targetClientScreen types.ScreenRect
-					for _, cs := range targetClientConn.MonitorInfo.Screens {
-						if cs.ID == targetLink.ToScreenID {
-							targetClientScreen = cs
-							break
-						}
-					}
-					if targetClientScreen.W == 0 { // Check if target screen was found
-						log.Printf("Cannot switch: Target client screen ID %d not found for client %s.\n", targetLink.ToScreenID, targetClientAddr)
-						continue
-					}
-
-					// Calculate initial client cursor position
-					initialClientX, initialClientY := calculateEntryPoint(x, y,
-						sourceScreen, targetLink.FromEdge,
-						targetClientScreen, targetLink.ToEdge)
-
-					// Update state (write lock)
-					s.clientsMutex.Lock()
-					s.remoteInputActive = true
-					s.activeClientAddr = targetClientAddr
-					s.lastSentMouseX = initialClientX // Store initial client coords
-					s.lastSentMouseY = initialClientY
-					activeClient, stillExists := s.clients[targetClientAddr]
-					if !stillExists {
-						log.Printf("Target client %s disconnected before input switch could complete.", targetClientAddr)
-						s.remoteInputActive = false
-						s.activeClientAddr = ""
-					} else {
-						initMouseEvent := types.MouseEvent{X: initialClientX, Y: initialClientY}
-						err := s.sendMessage(activeClient, types.TypeMouseEvent, initMouseEvent)
-						if err != nil {
-							log.Printf("Error sending initial mouse event to client %s: %v. Reverting switch.\n", targetClientAddr, err)
-							s.remoteInputActive = false
-							s.activeClientAddr = ""
-							go s.removeClient(targetClientAddr)
-						}
-					}
-					s.clientsMutex.Unlock()
-					// Move server cursor off-screen after switching to client
-					if stillExists { // Only move if the switch didn't fail due to disconnect
-						robotgo.MoveMouse(-1, -1)
-					}
-				}
-			}
-
-			time.Sleep(15 * time.Millisecond)
-		}
-	}
 }
 
 // UpdateLayout stores the abstract layout configuration for a given client.

@@ -394,6 +394,34 @@ func (a *AppUI) showClientStatusScreen() {
 	a.mainWin.SetContent(content)
 }
 
+// findPrimaryMonitorIndex identifies the likely primary monitor (contains 0,0 or top-leftmost).
+func findPrimaryMonitorIndex(screens []types.ScreenRect) int {
+	if len(screens) == 0 {
+		return -1 // No screens
+	}
+	topLeftIndex := 0
+	minX, minY := screens[0].X, screens[0].Y
+	containsOrigin := false
+	for i, s := range screens {
+		if s.X == 0 && s.Y == 0 {
+			return i // Found the one at origin
+		}
+		if !containsOrigin {
+			if s.X <= 0 && s.Y <= 0 && (s.X+s.W) > 0 && (s.Y+s.H) > 0 {
+				containsOrigin = true
+				topLeftIndex = i      // First one found containing origin
+				minX, minY = s.X, s.Y // Update min values relative to this one
+			} else if s.X < minX || (s.X == minX && s.Y < minY) {
+				// If no screen contains origin yet, track top-leftmost
+				minX = s.X
+				minY = s.Y
+				topLeftIndex = i
+			}
+		}
+	}
+	return topLeftIndex
+}
+
 // showMonitorManagementWindow requires AppUI to access the server
 func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.MonitorInfo, clientInfo types.MonitorInfo) {
 	a.monitorWindowsMtx.Lock()
@@ -404,105 +432,268 @@ func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.
 	monWin := a.fyneApp.NewWindow(fmt.Sprintf("Monitor Arrangement - %s", clientInfo.Hostname))
 
 	layoutCanvas := container.NewWithoutLayout()
-	// Store layout locally for this window instance, but update server on drag end
-	windowLayout := make(map[string]*types.VirtualScreen)
+	windowLayout := make(map[string]*types.VirtualScreen) // Tracks widget instances and their logical layout
+	widgetMap := make(map[string]*monitorWidget)          // Tracks the actual widgets for positioning
 
 	scale := float32(0.1)
-	padding := float32(20)
-	minX, minY, maxX, maxY := float32(0), float32(0), float32(0), float32(0)
-	if len(serverInfo.Screens) > 0 {
-		minX, minY = float32(serverInfo.Screens[0].X), float32(serverInfo.Screens[0].Y)
-		maxX, maxY = float32(serverInfo.Screens[0].X+serverInfo.Screens[0].W), float32(serverInfo.Screens[0].Y+serverInfo.Screens[0].H)
-	} else if len(clientInfo.Screens) > 0 {
-		minX, minY = float32(clientInfo.Screens[0].X), float32(clientInfo.Screens[0].Y)
-		maxX, maxY = float32(clientInfo.Screens[0].X+clientInfo.Screens[0].W), float32(clientInfo.Screens[0].Y+clientInfo.Screens[0].H)
-	} else {
+	padding := float32(30) // Increased padding between server/client groups
+
+	// Find primary monitors
+	serverPrimaryIndex := findPrimaryMonitorIndex(serverInfo.Screens)
+	clientPrimaryIndex := findPrimaryMonitorIndex(clientInfo.Screens)
+
+	if serverPrimaryIndex == -1 && clientPrimaryIndex == -1 {
 		log.Println("Warning: No screen info available for monitor management window for", clientAddr)
 		monWin.SetContent(widget.NewLabel("No screen information received from server or client."))
 		monWin.Resize(fyne.NewSize(300, 100))
 		monWin.Show()
 		return
 	}
-	allScreens := append([]types.ScreenRect{}, serverInfo.Screens...)
-	allScreens = append(allScreens, clientInfo.Screens...)
-	for _, screen := range allScreens {
-		if float32(screen.X) < minX {
-			minX = float32(screen.X)
-		}
-		if float32(screen.Y) < minY {
-			minY = float32(screen.Y)
-		}
-		if float32(screen.X+screen.W) > maxX {
-			maxX = float32(screen.X + screen.W)
-		}
-		if float32(screen.Y+screen.H) > maxY {
-			maxY = float32(screen.Y + screen.H)
-		}
-	}
-	offsetX := -minX*scale + padding
-	offsetY := -minY*scale + padding
 
-	addMonitor := func(info types.MonitorInfo, isServer bool) {
-		for _, screen := range info.Screens {
+	// Store initial relative positions for layout calculation
+	initialPositions := make(map[string]fyne.Position)
+
+	// Calculate initial position for server primary
+	var serverPrimaryWidgetPos fyne.Position
+	if serverPrimaryIndex != -1 {
+		serverPrimaryWidgetPos = fyne.NewPos(padding, padding) // Start server primary top-left
+		serverPrimaryScreen := serverInfo.Screens[serverPrimaryIndex]
+		key := types.ScreenKey(serverInfo.Hostname, serverPrimaryScreen.ID)
+		initialPositions[key] = serverPrimaryWidgetPos
+	}
+
+	// Calculate initial position for client primary relative to server primary
+	var clientPrimaryWidgetPos fyne.Position
+	if clientPrimaryIndex != -1 {
+		clientPrimaryScreen := clientInfo.Screens[clientPrimaryIndex]
+		if serverPrimaryIndex != -1 {
+			// Place client primary to the right of server primary
+			serverPrimaryScreen := serverInfo.Screens[serverPrimaryIndex]
+			serverPrimaryWidgetWidth := float32(serverPrimaryScreen.W) * scale
+			clientPrimaryWidgetPos = fyne.NewPos(serverPrimaryWidgetPos.X+serverPrimaryWidgetWidth+padding, serverPrimaryWidgetPos.Y)
+		} else {
+			// If no server primary, place client primary top-left
+			clientPrimaryWidgetPos = fyne.NewPos(padding, padding)
+		}
+		key := types.ScreenKey(clientInfo.Hostname, clientPrimaryScreen.ID)
+		initialPositions[key] = clientPrimaryWidgetPos
+	}
+
+	// Function to add and position monitors relatively
+	addAndPositionMonitors := func(info types.MonitorInfo, primaryIndex int, isServer bool) {
+		if primaryIndex == -1 || len(info.Screens) == 0 {
+			return // Skip if no primary or no screens
+		}
+		primaryScreen := info.Screens[primaryIndex]
+		primaryKey := types.ScreenKey(info.Hostname, primaryScreen.ID)
+		primaryWidgetPos := initialPositions[primaryKey]
+
+		for i, screen := range info.Screens {
 			mw := NewMonitorWidget(screen, info.Hostname, isServer)
+			layoutCanvas.Add(mw)
+			key := types.ScreenKey(info.Hostname, screen.ID)
+			widgetMap[key] = mw // Store widget reference
+
 			scaledW := float32(screen.W) * scale
 			scaledH := float32(screen.H) * scale
-			widgetX := (float32(screen.X)*scale + offsetX)
-			widgetY := (float32(screen.Y)*scale + offsetY)
-			initialPos := fyne.NewPos(widgetX, widgetY)
-			initialSize := fyne.NewSize(scaledW, scaledH)
+			mw.Resize(fyne.NewSize(scaledW, scaledH))
 
-			mw.Resize(initialSize)
-			mw.SetOffset(initialPos)
-			layoutCanvas.Add(mw)
+			var currentWidgetPos fyne.Position
+			if i == primaryIndex {
+				currentWidgetPos = primaryWidgetPos
+			} else {
+				// Calculate position relative to the primary monitor's widget
+				deltaX := float32(screen.X-primaryScreen.X) * scale
+				deltaY := float32(screen.Y-primaryScreen.Y) * scale
+				currentWidgetPos = fyne.NewPos(primaryWidgetPos.X+deltaX, primaryWidgetPos.Y+deltaY)
+			}
+			mw.Move(currentWidgetPos)
 
-			key := types.ScreenKey(info.Hostname, screen.ID)
+			// Create VirtualScreen entry for layout state
 			vScreen := &types.VirtualScreen{
 				ID:       screen.ID,
 				Hostname: info.Hostname,
 				IsServer: isServer,
 				Original: screen,
-				Position: types.Position{X: initialPos.X, Y: initialPos.Y},
-				Size:     types.Size{Width: initialSize.Width, Height: initialSize.Height},
+				Position: types.Position{X: currentWidgetPos.X, Y: currentWidgetPos.Y}, // Store initial widget pos
+				Size:     types.Size{Width: scaledW, Height: scaledH},
 			}
 			windowLayout[key] = vScreen
 
+			// DragEnd callback with snapping
 			mw.OnDragEnd = func(draggedWidget *monitorWidget) {
-				finalOffset := draggedWidget.GetOffset()
-				currentKey := types.ScreenKey(draggedWidget.hostname, draggedWidget.screenInfo.ID)
-				log.Printf("Callback DragEnd %s to %v\n", currentKey, finalOffset)
+				const snapThreshold = float32(15.0) // Max distance to snap
+				const minOverlapRatio = 0.3         // Minimum overlap needed to snap edges
 
-				// Update the local window layout first
-				if vScreen, ok := windowLayout[currentKey]; ok {
-					vScreen.Position = types.Position{X: finalOffset.X, Y: finalOffset.Y}
+				finalPos := draggedWidget.Position()
+				draggedSize := draggedWidget.Size()
+				draggedKey := types.ScreenKey(draggedWidget.hostname, draggedWidget.screenInfo.ID)
+
+				bestSnapDeltaX := float32(math.Inf(1))
+				bestSnapDeltaY := float32(math.Inf(1))
+				snappedX := false
+				snappedY := false
+
+				// Iterate through all *other* widgets to find snap candidates
+				for otherKey, otherWidget := range widgetMap {
+					if otherKey == draggedKey {
+						continue // Don't snap to self
+					}
+					otherPos := otherWidget.Position()
+					otherSize := otherWidget.Size()
+
+					// Calculate vertical overlap range and length
+					overlapYStart := max(finalPos.Y, otherPos.Y)
+					overlapYEnd := min(finalPos.Y+draggedSize.Height, otherPos.Y+otherSize.Height)
+					overlapYLen := overlapYEnd - overlapYStart
+
+					// Calculate horizontal overlap range and length
+					overlapXStart := max(finalPos.X, otherPos.X)
+					overlapXEnd := min(finalPos.X+draggedSize.Width, otherPos.X+otherSize.Width)
+					overlapXLen := overlapXEnd - overlapXStart
+
+					// --- Check Horizontal Snaps (Left/Right) ---
+					if overlapYLen > minOverlapRatio*min(draggedSize.Height, otherSize.Height) { // Check for sufficient vertical overlap
+						// Dragged Right edge to Other Left edge
+						dx := otherPos.X - (finalPos.X + draggedSize.Width)
+						if abs(dx) < snapThreshold && abs(dx) < abs(bestSnapDeltaX) {
+							bestSnapDeltaX = dx
+							snappedX = true
+						}
+						// Dragged Left edge to Other Right edge
+						dx = (otherPos.X + otherSize.Width) - finalPos.X
+						if abs(dx) < snapThreshold && abs(dx) < abs(bestSnapDeltaX) {
+							bestSnapDeltaX = dx
+							snappedX = true
+						}
+						// Dragged Left edge to Other Left edge
+						dx = otherPos.X - finalPos.X
+						if abs(dx) < snapThreshold && abs(dx) < abs(bestSnapDeltaX) {
+							bestSnapDeltaX = dx
+							snappedX = true
+						}
+						// Dragged Right edge to Other Right edge
+						dx = (otherPos.X + otherSize.Width) - (finalPos.X + draggedSize.Width)
+						if abs(dx) < snapThreshold && abs(dx) < abs(bestSnapDeltaX) {
+							bestSnapDeltaX = dx
+							snappedX = true
+						}
+					}
+
+					// --- Check Vertical Snaps (Top/Bottom) ---
+					if overlapXLen > minOverlapRatio*min(draggedSize.Width, otherSize.Width) { // Check for sufficient horizontal overlap
+						// Dragged Bottom edge to Other Top edge
+						dy := otherPos.Y - (finalPos.Y + draggedSize.Height)
+						if abs(dy) < snapThreshold && abs(dy) < abs(bestSnapDeltaY) {
+							bestSnapDeltaY = dy
+							snappedY = true
+						}
+						// Dragged Top edge to Other Bottom edge
+						dy = (otherPos.Y + otherSize.Height) - finalPos.Y
+						if abs(dy) < snapThreshold && abs(dy) < abs(bestSnapDeltaY) {
+							bestSnapDeltaY = dy
+							snappedY = true
+						}
+						// Dragged Top edge to Other Top edge
+						dy = otherPos.Y - finalPos.Y
+						if abs(dy) < snapThreshold && abs(dy) < abs(bestSnapDeltaY) {
+							bestSnapDeltaY = dy
+							snappedY = true
+						}
+						// Dragged Bottom edge to Other Bottom edge
+						dy = (otherPos.Y + otherSize.Height) - (finalPos.Y + draggedSize.Height)
+						if abs(dy) < snapThreshold && abs(dy) < abs(bestSnapDeltaY) {
+							bestSnapDeltaY = dy
+							snappedY = true
+						}
+					}
 				}
 
-				// Calculate the abstract layout config based on visual arrangement
-				layoutConfig := calculateLayoutConfiguration(windowLayout)
+				// Apply the best snap found (preferring the closer snap if both X and Y are possible)
+				finalSnappedPos := finalPos
+				if snappedX && (!snappedY || abs(bestSnapDeltaX) <= abs(bestSnapDeltaY)) {
+					finalSnappedPos.X += bestSnapDeltaX
+					log.Printf("Snapped X by %.1f", bestSnapDeltaX)
+				} else if snappedY {
+					finalSnappedPos.Y += bestSnapDeltaY
+					log.Printf("Snapped Y by %.1f", bestSnapDeltaY)
+				}
 
-				// Now, update the server's master layout for this client
+				// Move the widget visually to the snapped position
+				draggedWidget.Move(finalSnappedPos)
+
+				// Update the layout state with the final snapped position
+				if vScreen, ok := windowLayout[draggedKey]; ok {
+					vScreen.Position = types.Position{X: finalSnappedPos.X, Y: finalSnappedPos.Y}
+				}
+
+				// Recalculate layout configuration based on the new (snapped) positions
+				layoutConfig := calculateLayoutConfiguration(windowLayout)
 				if a.server != nil {
 					a.server.UpdateLayout(clientAddr, layoutConfig)
 				} else {
 					log.Println("Error: Server is nil, cannot update layout.")
 				}
-				// TODO: Snapping logic
 			}
 		}
 	}
 
-	addMonitor(serverInfo, true)
-	addMonitor(clientInfo, false)
+	// Add monitors using the relative positioning logic
+	addAndPositionMonitors(serverInfo, serverPrimaryIndex, true)
+	addAndPositionMonitors(clientInfo, clientPrimaryIndex, false)
 
-	// Update the server's master layout with the initial state
+	// Calculate required canvas size based on placed widgets
+	minWidgetX, minWidgetY := float32(math.Inf(1)), float32(math.Inf(1))
+	maxWidgetX, maxWidgetY := float32(math.Inf(-1)), float32(math.Inf(-1))
+
+	if len(widgetMap) == 0 { // Handle case with no widgets added
+		minWidgetX, minWidgetY = 0, 0
+		maxWidgetX, maxWidgetY = 2*padding, 2*padding // Default small size
+	} else {
+		for _, widget := range widgetMap {
+			pos := widget.Position()
+			size := widget.Size()
+			minWidgetX = min(minWidgetX, pos.X)
+			minWidgetY = min(minWidgetY, pos.Y)
+			maxWidgetX = max(maxWidgetX, pos.X+size.Width)
+			maxWidgetY = max(maxWidgetY, pos.Y+size.Height)
+		}
+	}
+
+	// Ensure minimum padding around the content
+	totalWidth := maxWidgetX + padding // Add padding to the right/bottom edge
+	totalHeight := maxWidgetY + padding
+	// If minWidgetX/Y is less than padding, we need to shift everything and increase size
+	shiftX := float32(0)
+	shiftY := float32(0)
+	if minWidgetX < padding {
+		shiftX = padding - minWidgetX
+		totalWidth += shiftX
+	}
+	if minWidgetY < padding {
+		shiftY = padding - minWidgetY
+		totalHeight += shiftY
+	}
+
+	// Apply shift if necessary
+	if shiftX > 0 || shiftY > 0 {
+		for _, widget := range widgetMap {
+			widget.Move(widget.Position().Add(fyne.NewPos(shiftX, shiftY)))
+		}
+		// Update positions in windowLayout as well
+		for _, vScreen := range windowLayout {
+			vScreen.Position.X += shiftX
+			vScreen.Position.Y += shiftY
+		}
+	}
+
+	// Update the server's master layout with the calculated initial state
 	if a.server != nil {
 		initialLayoutConfig := calculateLayoutConfiguration(windowLayout)
 		a.server.UpdateLayout(clientAddr, initialLayoutConfig)
 	}
 
 	content := layoutCanvas
-	totalWidth := (maxX-minX)*scale + 2*padding
-	totalHeight := (maxY-minY)*scale + 2*padding
 	monWin.SetContent(content)
 	monWin.Resize(fyne.NewSize(totalWidth, totalHeight))
 	monWin.SetOnClosed(func() {
@@ -599,6 +790,28 @@ func calculateLayoutConfiguration(layout map[string]*types.VirtualScreen) *types
 
 	log.Printf("Calculated %d edge links from layout", len(links))
 	return &types.LayoutConfiguration{Links: links}
+}
+
+// Helper functions for layout calculations
+func abs(x float32) float32 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func max(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b float32) float32 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // serverUIUpdater passes the AppUI instance to showMonitorManagementWindow
