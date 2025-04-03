@@ -6,6 +6,7 @@ require (
 	fyne.io/fyne/v2 v2.5.5
 	github.com/go-vgo/robotgo v0.110.6
 	github.com/robotn/gohook v0.42.0
+	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394
 )
 
 require (
@@ -55,7 +56,6 @@ require (
 	github.com/vcaesar/tt v0.20.1 // indirect
 	github.com/yuin/goldmark v1.7.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	golang.org/x/image v0.25.0 // indirect
 	golang.org/x/mobile v0.0.0-20231127183840-76ac6878050a // indirect
 	golang.org/x/net v0.25.0 // indirect

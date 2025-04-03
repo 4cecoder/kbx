@@ -42,6 +42,8 @@ type Server struct {
 	discoveryStop chan struct{}
 	// Channel to signal UI about new client connections / monitor info updates
 	ClientUpdateChan chan *ClientConnection
+	// Channel to signal UI about startup warnings (e.g., permissions)
+	WarningChan chan string
 
 	// Input Redirection State
 	remoteInputActive bool   // Is input currently directed to a client?
@@ -84,6 +86,7 @@ func NewServer(port int) (*Server, error) {
 		stopChan:          make(chan struct{}),
 		discoveryStop:     make(chan struct{}),
 		ClientUpdateChan:  make(chan *ClientConnection, 5),
+		WarningChan:       make(chan string, 1), // Buffer 1 for startup warning
 		remoteInputActive: false,
 		activeClientAddr:  "",
 		layoutConfigs:     make(map[string]*types.LayoutConfiguration),
@@ -234,6 +237,31 @@ func (s *Server) removeClient(addr string) {
 }
 
 func (s *Server) captureKeyboard() {
+	log.Println("Starting keyboard capture...")
+	evChan := hook.Start()
+	// Check for Accessibility permission error specifically on macOS
+	if runtime.GOOS == "darwin" {
+		// A bit hacky: check if the event channel is nil after Start()
+		// gohook doesn't seem to return a specific error for permissions,
+		// but often fails to initialize the channel.
+		// Also check for the known log message text if possible (though fragile).
+		// We'll primarily rely on the channel being nil or closed immediately.
+		_, chanOpen := <-evChan // Non-blocking read to check if closed
+		if !chanOpen {
+			log.Println("Warning: hook.Start() failed, likely missing macOS Accessibility permissions.")
+			select {
+			case s.WarningChan <- "macOS Accessibility permission likely missing.":
+			default: // Avoid blocking if channel is full/closed
+			}
+			// Don't return here; allow hook registration attempt even if check was flaky.
+			// If permissions are actually granted, registration should succeed.
+			// return
+		}
+	}
+	defer hook.End()
+
+	log.Println("Keyboard capture hook started successfully.")
+
 	hook.Register(hook.KeyDown, []string{}, func(e hook.Event) {
 		s.clientsMutex.RLock()
 		isRemote := s.remoteInputActive
@@ -283,14 +311,11 @@ func (s *Server) captureKeyboard() {
 		}
 	})
 
-	evh := hook.Start()
-	defer hook.End()
-
 	for {
 		select {
 		case <-s.stopChan:
 			return
-		case <-evh:
+		case <-evChan:
 			// We handle events via the registered callbacks now
 		}
 	}
@@ -740,4 +765,9 @@ func (s *Server) GetLayout(clientAddr string) (*types.LayoutConfiguration, bool)
 func (s *Server) GetServerScreens() []types.ScreenRect {
 	// Assuming serverScreens is immutable after startup, no lock needed
 	return s.serverScreens
+}
+
+// GetWarningChan returns the channel for server warnings.
+func (s *Server) GetWarningChan() <-chan string {
+	return s.WarningChan
 }

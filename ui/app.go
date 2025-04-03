@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"os/exec"
 	"runtime"
 	"sync"
 	"time"
@@ -113,6 +114,7 @@ func (a *AppUI) createMainContent() fyne.CanvasObject {
 func (a *AppUI) startServerUI() {
 	if a.client != nil {
 		a.client.Stop()
+		a.client = nil
 	}
 	if a.server != nil {
 		a.server.Stop()
@@ -175,6 +177,74 @@ func (a *AppUI) startServerUI() {
 		stopBtn,
 	)
 	a.mainWin.SetContent(content)
+
+	// Start listening for server warnings (e.g., macOS permissions)
+	go func() {
+		warningChan := a.server.GetWarningChan()
+		select {
+		case warningMsg := <-warningChan:
+			log.Printf("Received server warning: %s", warningMsg)
+			if a.server != nil { // Check if server is still running
+				warningLabel := widget.NewLabelWithStyle(
+					fmt.Sprintf(
+						"WARNING: %s\nPlease grant Accessibility permission to **this application** in System Settings -> Privacy & Security, then restart using the button below.",
+						warningMsg,
+					),
+					fyne.TextAlignLeading,
+					fyne.TextStyle{Bold: true},
+				)
+				warningLabel.Wrapping = fyne.TextWrapWord
+
+				restartBtn := widget.NewButton("Restart App Now", func() {
+					log.Println("Restart button clicked. Attempting to restart application...")
+
+					// Attempt to stop server gracefully
+					if a.server != nil {
+						log.Println("Stopping current server instance...")
+						a.server.Stop()
+						a.server = nil
+					}
+					// Stop client too, just in case (though unlikely in server mode)
+					if a.client != nil {
+						a.client.Stop()
+						a.client = nil
+					}
+
+					executable, err := os.Executable()
+					if err != nil {
+						log.Printf("Error getting executable path: %v", err)
+						// Optionally show an error dialog to the user here
+						return
+					}
+
+					cmd := exec.Command(executable, os.Args[1:]...)
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+
+					err = cmd.Start() // Start new process
+					if err != nil {
+						log.Printf("Error starting new process: %v", err)
+						// Optionally show an error dialog
+						return
+					}
+
+					log.Println("New process started, quitting current application.")
+					a.fyneApp.Quit() // Quit the current Fyne app instance
+				})
+
+				// Prepend warning and button to the existing content
+				if currentContent, ok := a.mainWin.Content().(*fyne.Container); ok {
+					// Add a little space between warning and button
+					warningContainer := container.NewVBox(warningLabel, widget.NewSeparator(), restartBtn)
+					currentContent.Objects = append([]fyne.CanvasObject{warningContainer, widget.NewSeparator()}, currentContent.Objects...)
+					currentContent.Refresh()
+				}
+			}
+		case <-time.After(1 * time.Second): // Timeout if no immediate warning
+			// No warning received shortly after start, assume okay for now
+			return
+		}
+	}()
 }
 
 // startClientUI handles the logic when the "Start Client" button is clicked
@@ -185,6 +255,7 @@ func (a *AppUI) startClientUI() {
 	}
 	if a.client != nil {
 		a.client.Stop()
+		a.client = nil
 	}
 	a.client = client.NewClient() // Create a fresh client instance for discovery
 
@@ -271,6 +342,7 @@ func (a *AppUI) startClientUI() {
 		close(stopTickerChan)
 		if a.client != nil {
 			a.client.Stop()
+			a.client = nil
 		}
 		a.mainWin.SetContent(a.createMainContent())
 	})
@@ -306,6 +378,7 @@ func (a *AppUI) showClientStatusScreen() {
 	stopBtn := widget.NewButton("Disconnect", func() {
 		if a.client != nil {
 			a.client.Stop()
+			a.client = nil
 			a.mainWin.SetContent(a.createMainContent())
 		}
 	})
