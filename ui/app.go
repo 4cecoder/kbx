@@ -17,6 +17,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/data/binding"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/go-vgo/robotgo"
 )
@@ -154,6 +155,141 @@ func (a *AppUI) startServerUI() {
 	deviceLabel := widget.NewLabel(deviceInfoText)
 	clientsLabel := widget.NewLabel("Waiting for clients...")
 
+	// Create buttons with icons for screen switching
+	switchToClientBtn := widget.NewButtonWithIcon("Switch to Client", theme.LogoutIcon(), func() {
+		// Find first available client
+		a.server.RLockClientsMutex()
+		clients := a.server.GetClients()
+		if len(clients) == 0 {
+			// Show a message if no clients
+			fyne.CurrentApp().SendNotification(&fyne.Notification{
+				Title:   "No Clients Available",
+				Content: "Connect a client to switch control",
+			})
+			a.server.RUnlockClientsMutex()
+			return
+		}
+
+		var targetClient *server.ClientConnection
+		var targetAddr string
+		for addr, client := range clients {
+			if client.MonitorInfo != nil {
+				targetClient = client
+				targetAddr = addr
+				break
+			}
+		}
+		a.server.RUnlockClientsMutex()
+
+		if targetClient == nil || targetClient.MonitorInfo == nil {
+			fyne.CurrentApp().SendNotification(&fyne.Notification{
+				Title:   "No Valid Clients",
+				Content: "Client has no monitor information",
+			})
+			return
+		}
+
+		// Get monitor info for client's first screen
+		clientScreen := targetClient.MonitorInfo.Screens[0]
+
+		// Position cursor in center of client's first screen
+		initialClientX := clientScreen.X + clientScreen.W/2
+		initialClientY := clientScreen.Y + clientScreen.H/2
+
+		// Update state
+		a.server.SetRemoteInputActive(true)
+		a.server.SetActiveClientAddr(targetAddr)
+		a.server.SetLastSentMousePos(initialClientX, initialClientY)
+
+		// Send mouse event to position cursor
+		initMouseEvent := types.MouseEvent{
+			X:      initialClientX,
+			Y:      initialClientY,
+			Action: types.ActionMove,
+		}
+
+		err := a.server.SendMessage(targetClient, types.TypeMouseEvent, initMouseEvent)
+		if err != nil {
+			log.Printf("Error sending initial mouse event: %v", err)
+			a.server.SetRemoteInputActive(false)
+			a.server.SetActiveClientAddr("")
+			return
+		}
+
+		// Move server cursor off-screen
+		robotgo.MoveMouse(-1, -1)
+
+		// Notify user about switch
+		fyne.CurrentApp().SendNotification(&fyne.Notification{
+			Title:   "Control Switched",
+			Content: "Now controlling client: " + targetAddr,
+		})
+	})
+
+	switchToServerBtn := widget.NewButtonWithIcon("Switch to Server", theme.HomeIcon(), func() {
+		// Check if we need to switch
+		isRemote := a.server.IsRemoteInputActive()
+
+		if !isRemote {
+			fyne.CurrentApp().SendNotification(&fyne.Notification{
+				Title:   "Already in Control",
+				Content: "Already controlling server",
+			})
+			return
+		}
+
+		// Get server screens
+		serverScreens := a.server.GetServerScreens()
+		if len(serverScreens) == 0 {
+			fyne.CurrentApp().SendNotification(&fyne.Notification{
+				Title:   "Error",
+				Content: "No server screens available",
+			})
+			return
+		}
+
+		// Position cursor in center of server's first screen
+		serverScreen := serverScreens[0]
+		entryX := serverScreen.X + serverScreen.W/2
+		entryY := serverScreen.Y + serverScreen.H/2
+
+		// Update state
+		a.server.SetRemoteInputActive(false)
+		a.server.SetActiveClientAddr("")
+
+		// Move cursor to server screen
+		robotgo.Move(entryX, entryY)
+
+		// Notify user
+		fyne.CurrentApp().SendNotification(&fyne.Notification{
+			Title:   "Control Switched",
+			Content: "Now controlling server",
+		})
+	})
+
+	// Add a button to show shortcuts
+	showShortcutsBtn := widget.NewButtonWithIcon("Keyboard Shortcuts", theme.HelpIcon(), func() {
+		shortcutsWindow := a.fyneApp.NewWindow("Keyboard Shortcuts")
+		shortcutsWindow.SetContent(container.NewVBox(
+			widget.NewLabelWithStyle("Keyboard Shortcuts for Screen Control", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			widget.NewSeparator(),
+			widget.NewLabel("F1: Switch to client"),
+			widget.NewLabel("F2: Switch to server"),
+			widget.NewLabel("Option+Right Arrow: Switch to client"),
+			widget.NewLabel("Option+Left Arrow: Switch to server"),
+			widget.NewLabel("Command+Tab: Switch to client"),
+			widget.NewLabel("Command+Backtick: Switch to server"),
+		))
+		shortcutsWindow.Resize(fyne.NewSize(300, 200))
+		shortcutsWindow.Show()
+	})
+
+	controlContainer := container.NewHBox(
+		switchToClientBtn,
+		switchToServerBtn,
+		showShortcutsBtn,
+	)
+
 	stopBtn := widget.NewButton("Stop Server", func() {
 		if a.server != nil {
 			a.server.Stop()
@@ -173,7 +309,11 @@ func (a *AppUI) startServerUI() {
 		statusLabel,
 		deviceLabel,
 		clientsLabel,
-		widget.NewLabel("Press ESC to stop (or use button)"),
+		widget.NewLabel("Screen Control:"),
+		controlContainer,
+		widget.NewSeparator(),
+		widget.NewLabel("Keyboard shortcuts are also available. Click the button above to see them."),
+		widget.NewSeparator(),
 		stopBtn,
 	)
 	a.mainWin.SetContent(content)

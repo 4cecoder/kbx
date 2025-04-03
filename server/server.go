@@ -96,13 +96,18 @@ func NewServer(port int) (*Server, error) {
 }
 
 // Send a wrapped message to a specific client
-func (s *Server) sendMessage(client *ClientConnection, msgType types.MessageType, payload interface{}) error {
+func (s *Server) SendMessage(client *ClientConnection, msgType types.MessageType, payload interface{}) error {
 	wrappedMsg := types.WrappedMessage{
 		Type:    msgType,
 		Payload: payload,
 	}
 	// Use the client's dedicated encoder
 	return client.Encoder.Encode(wrappedMsg)
+}
+
+// Alias for backwards compatibility
+func (s *Server) sendMessage(client *ClientConnection, msgType types.MessageType, payload interface{}) error {
+	return s.SendMessage(client, msgType, payload)
 }
 
 // Start begins the server's operations: accepting connections and capturing input.
@@ -1123,4 +1128,79 @@ func (s *Server) GetServerScreens() []types.ScreenRect {
 // GetWarningChan returns the channel for server warnings.
 func (s *Server) GetWarningChan() <-chan string {
 	return s.WarningChan
+}
+
+// GetClients returns a copy of the clients map
+func (s *Server) GetClients() map[string]*ClientConnection {
+	s.clientsMutex.RLock()
+	defer s.clientsMutex.RUnlock()
+
+	result := make(map[string]*ClientConnection, len(s.clients))
+	for k, v := range s.clients {
+		result[k] = v
+	}
+	return result
+}
+
+// IsRemoteInputActive returns the current state of remote input
+func (s *Server) IsRemoteInputActive() bool {
+	s.clientsMutex.RLock()
+	defer s.clientsMutex.RUnlock()
+	return s.remoteInputActive
+}
+
+// SetRemoteInputActive sets the remote input state
+func (s *Server) SetRemoteInputActive(active bool) {
+	s.clientsMutex.Lock()
+	defer s.clientsMutex.Unlock()
+	s.remoteInputActive = active
+}
+
+// GetActiveClientAddr returns the current active client address
+func (s *Server) GetActiveClientAddr() string {
+	s.clientsMutex.RLock()
+	defer s.clientsMutex.RUnlock()
+	return s.activeClientAddr
+}
+
+// SetActiveClientAddr sets the active client address
+func (s *Server) SetActiveClientAddr(addr string) {
+	s.clientsMutex.Lock()
+	defer s.clientsMutex.Unlock()
+	s.activeClientAddr = addr
+}
+
+// SetLastSentMousePos sets the last sent mouse position
+func (s *Server) SetLastSentMousePos(x, y int) {
+	s.clientsMutex.Lock()
+	defer s.clientsMutex.Unlock()
+	s.lastSentMouseX = x
+	s.lastSentMouseY = y
+}
+
+// GetLastSentMousePos returns the last sent mouse position
+func (s *Server) GetLastSentMousePos() (int, int) {
+	s.clientsMutex.RLock()
+	defer s.clientsMutex.RUnlock()
+	return s.lastSentMouseX, s.lastSentMouseY
+}
+
+// LockClientsMutex locks the clients mutex
+func (s *Server) LockClientsMutex() {
+	s.clientsMutex.Lock()
+}
+
+// UnlockClientsMutex unlocks the clients mutex
+func (s *Server) UnlockClientsMutex() {
+	s.clientsMutex.Unlock()
+}
+
+// RLockClientsMutex read locks the clients mutex
+func (s *Server) RLockClientsMutex() {
+	s.clientsMutex.RLock()
+}
+
+// RUnlockClientsMutex read unlocks the clients mutex
+func (s *Server) RUnlockClientsMutex() {
+	s.clientsMutex.RUnlock()
 }
