@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"runtime"
 	"sync"
@@ -403,9 +404,12 @@ func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.
 					vScreen.Position = types.Position{X: finalOffset.X, Y: finalOffset.Y}
 				}
 
+				// Calculate the abstract layout config based on visual arrangement
+				layoutConfig := calculateLayoutConfiguration(windowLayout)
+
 				// Now, update the server's master layout for this client
 				if a.server != nil {
-					a.server.UpdateLayout(clientAddr, windowLayout)
+					a.server.UpdateLayout(clientAddr, layoutConfig)
 				} else {
 					log.Println("Error: Server is nil, cannot update layout.")
 				}
@@ -419,7 +423,8 @@ func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.
 
 	// Update the server's master layout with the initial state
 	if a.server != nil {
-		a.server.UpdateLayout(clientAddr, windowLayout)
+		initialLayoutConfig := calculateLayoutConfiguration(windowLayout)
+		a.server.UpdateLayout(clientAddr, initialLayoutConfig)
 	}
 
 	content := layoutCanvas
@@ -437,6 +442,90 @@ func (a *AppUI) showMonitorManagementWindow(clientAddr string, serverInfo types.
 	a.monitorWindows[clientAddr] = monWin
 	a.monitorWindowsMtx.Unlock()
 	monWin.Show()
+}
+
+// calculateLayoutConfiguration determines edge links based on the visual arrangement
+func calculateLayoutConfiguration(layout map[string]*types.VirtualScreen) *types.LayoutConfiguration {
+	const snapThreshold = 15.0 // Max distance between edges to consider them linked
+
+	var links []types.EdgeLink
+
+	// Convert map to slice for easier iteration
+	screens := make([]*types.VirtualScreen, 0, len(layout))
+	for _, v := range layout {
+		screens = append(screens, v)
+	}
+
+	// Compare every screen with every other screen
+	for i := 0; i < len(screens); i++ {
+		s1 := screens[i]
+		pos1 := s1.Position // Use UI position/size
+		size1 := s1.Size
+
+		for j := i + 1; j < len(screens); j++ {
+			s2 := screens[j]
+			pos2 := s2.Position
+			size2 := s2.Size
+
+			// Check Right edge of s1 to Left edge of s2
+			verticalOverlap := math.Max(float64(pos1.Y), float64(pos2.Y)) < math.Min(float64(pos1.Y+size1.Height), float64(pos2.Y+size2.Height))
+			horizontalDistance := math.Abs(float64((pos1.X + size1.Width) - pos2.X))
+			if verticalOverlap && horizontalDistance <= float64(snapThreshold) {
+				links = append(links, types.EdgeLink{
+					FromHostname: s1.Hostname, FromScreenID: s1.Original.ID, FromEdge: types.EdgeRight,
+					ToHostname: s2.Hostname, ToScreenID: s2.Original.ID, ToEdge: types.EdgeLeft,
+				})
+				// Add reciprocal link
+				links = append(links, types.EdgeLink{
+					FromHostname: s2.Hostname, FromScreenID: s2.Original.ID, FromEdge: types.EdgeLeft,
+					ToHostname: s1.Hostname, ToScreenID: s1.Original.ID, ToEdge: types.EdgeRight,
+				})
+			}
+
+			// Check Left edge of s1 to Right edge of s2
+			horizontalDistance = math.Abs(float64(pos1.X - (pos2.X + size2.Width)))
+			if verticalOverlap && horizontalDistance <= float64(snapThreshold) {
+				links = append(links, types.EdgeLink{
+					FromHostname: s1.Hostname, FromScreenID: s1.Original.ID, FromEdge: types.EdgeLeft,
+					ToHostname: s2.Hostname, ToScreenID: s2.Original.ID, ToEdge: types.EdgeRight,
+				})
+				links = append(links, types.EdgeLink{
+					FromHostname: s2.Hostname, FromScreenID: s2.Original.ID, FromEdge: types.EdgeRight,
+					ToHostname: s1.Hostname, ToScreenID: s1.Original.ID, ToEdge: types.EdgeLeft,
+				})
+			}
+
+			// Check Bottom edge of s1 to Top edge of s2
+			horizontalOverlap := math.Max(float64(pos1.X), float64(pos2.X)) < math.Min(float64(pos1.X+size1.Width), float64(pos2.X+size2.Width))
+			verticalDistance := math.Abs(float64((pos1.Y + size1.Height) - pos2.Y))
+			if horizontalOverlap && verticalDistance <= float64(snapThreshold) {
+				links = append(links, types.EdgeLink{
+					FromHostname: s1.Hostname, FromScreenID: s1.Original.ID, FromEdge: types.EdgeBottom,
+					ToHostname: s2.Hostname, ToScreenID: s2.Original.ID, ToEdge: types.EdgeTop,
+				})
+				links = append(links, types.EdgeLink{
+					FromHostname: s2.Hostname, FromScreenID: s2.Original.ID, FromEdge: types.EdgeTop,
+					ToHostname: s1.Hostname, ToScreenID: s1.Original.ID, ToEdge: types.EdgeBottom,
+				})
+			}
+
+			// Check Top edge of s1 to Bottom edge of s2
+			verticalDistance = math.Abs(float64(pos1.Y - (pos2.Y + size2.Height)))
+			if horizontalOverlap && verticalDistance <= float64(snapThreshold) {
+				links = append(links, types.EdgeLink{
+					FromHostname: s1.Hostname, FromScreenID: s1.Original.ID, FromEdge: types.EdgeTop,
+					ToHostname: s2.Hostname, ToScreenID: s2.Original.ID, ToEdge: types.EdgeBottom,
+				})
+				links = append(links, types.EdgeLink{
+					FromHostname: s2.Hostname, FromScreenID: s2.Original.ID, FromEdge: types.EdgeBottom,
+					ToHostname: s1.Hostname, ToScreenID: s1.Original.ID, ToEdge: types.EdgeTop,
+				})
+			}
+		}
+	}
+
+	log.Printf("Calculated %d edge links from layout", len(links))
+	return &types.LayoutConfiguration{Links: links}
 }
 
 // serverUIUpdater passes the AppUI instance to showMonitorManagementWindow

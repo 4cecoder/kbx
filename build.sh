@@ -42,19 +42,13 @@ echo "go mod tidy completed successfully."
 
 # Run the build
 echo "Running go build..."
-go build
+go build && ./kb
 BUILD_EXIT_CODE=$?
 
 # Check build result
 if [ $BUILD_EXIT_CODE -ne 0 ]; then
     echo "Error: go build failed with exit code $BUILD_EXIT_CODE" >&2
     exit $BUILD_EXIT_CODE
-else
-    echo "go build completed successfully."
-    # Announce completion using macOS text-to-speech
-    if command -v say &> /dev/null; then
-        say "Build complete"
-    fi
 fi
 
 exit 0 

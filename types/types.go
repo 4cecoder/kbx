@@ -82,6 +82,31 @@ type WrappedMessage struct {
 	Payload interface{} `json:"payload"` // Can be KeyEvent, MonitorInfo, etc.
 }
 
+// ScreenEdge represents the edges of a screen for linking layouts
+type ScreenEdge string
+
+const (
+	EdgeLeft   ScreenEdge = "left"
+	EdgeRight  ScreenEdge = "right"
+	EdgeTop    ScreenEdge = "top"
+	EdgeBottom ScreenEdge = "bottom"
+)
+
+// EdgeLink defines a connection between two screen edges in the layout
+type EdgeLink struct {
+	FromHostname string     `json:"from_hostname"`
+	FromScreenID int        `json:"from_screen_id"`
+	FromEdge     ScreenEdge `json:"from_edge"`
+	ToHostname   string     `json:"to_hostname"`
+	ToScreenID   int        `json:"to_screen_id"`
+	ToEdge       ScreenEdge `json:"to_edge"`
+}
+
+// LayoutConfiguration stores the defined links between screens for a specific client
+type LayoutConfiguration struct {
+	Links []EdgeLink `json:"links"`
+}
+
 // Helper to create a unique key for a screen
 func ScreenKey(hostname string, screenID int) string {
 	return fmt.Sprintf("%s-%d", hostname, screenID)
