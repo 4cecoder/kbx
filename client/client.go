@@ -220,9 +220,12 @@ func (c *Client) receiveMessages() {
 				}
 				// Replay the keyboard event
 				if event.Type == "keydown" {
-					robotgo.KeyTap(event.Keychar)
-					fmt.Printf("Replayed KeyDown: %s\n", event.Keychar)
-				} // KeyUp is ignored for now
+					robotgo.KeyDown(event.Keychar)
+					fmt.Printf("Pressed KeyDown: %s\n", event.Keychar)
+				} else if event.Type == "keyup" {
+					robotgo.KeyUp(event.Keychar)
+					fmt.Printf("Released KeyUp: %s\n", event.Keychar)
+				}
 
 			case types.TypeMonitorInfo:
 				payloadBytes, _ := json.Marshal(wrappedMsg.Payload)
@@ -246,9 +249,41 @@ func (c *Client) receiveMessages() {
 					continue
 				}
 
-				// Move the mouse cursor to the coordinates received from the server
-				robotgo.Move(mouseEvent.X, mouseEvent.Y)
-				fmt.Printf("Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+				// Add additional debugging
+				x, y := robotgo.GetMousePos()
+				fmt.Printf("Current mouse position before move: X: %d, Y: %d\n", x, y)
+
+				// Handle different mouse events based on action
+				if mouseEvent.Action == types.ActionMove || mouseEvent.Action == "" {
+					// Move the mouse cursor to the coordinates received from the server
+					robotgo.Move(mouseEvent.X, mouseEvent.Y)
+					fmt.Printf("MOUSE EVENT: Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+
+					// Verify the position after move
+					newX, newY := robotgo.GetMousePos()
+					if newX != mouseEvent.X || newY != mouseEvent.Y {
+						fmt.Printf("WARNING: Mouse position mismatch after move. Expected (%d,%d), got (%d,%d)\n",
+							mouseEvent.X, mouseEvent.Y, newX, newY)
+					}
+				} else if mouseEvent.Action == types.ActionDown {
+					// Handle mouse button down
+					button := string(mouseEvent.Button)
+					fmt.Printf("MOUSE EVENT: Button Down - %s at (%d,%d)\n", button, mouseEvent.X, mouseEvent.Y)
+					robotgo.Move(mouseEvent.X, mouseEvent.Y)
+					robotgo.Toggle(button, "down")
+				} else if mouseEvent.Action == types.ActionUp {
+					// Handle mouse button up
+					button := string(mouseEvent.Button)
+					fmt.Printf("MOUSE EVENT: Button Up - %s at (%d,%d)\n", button, mouseEvent.X, mouseEvent.Y)
+					robotgo.Move(mouseEvent.X, mouseEvent.Y)
+					robotgo.Toggle(button, "up")
+				} else if mouseEvent.Action == types.ActionClick {
+					// Handle mouse click
+					button := string(mouseEvent.Button)
+					fmt.Printf("MOUSE EVENT: Click - %s at (%d,%d)\n", button, mouseEvent.X, mouseEvent.Y)
+					robotgo.Move(mouseEvent.X, mouseEvent.Y)
+					robotgo.Click(button)
+				}
 
 			default:
 				fmt.Printf("Received unhandled message type '%s' from server\n", wrappedMsg.Type)
@@ -365,9 +400,12 @@ func (c *Client) listenForMessages() {
 			}
 			// Replay the keyboard event
 			if event.Type == "keydown" {
-				robotgo.KeyTap(event.Keychar)
-				fmt.Printf("Replayed KeyDown: %s\n", event.Keychar)
-			} // KeyUp is ignored for now
+				robotgo.KeyDown(event.Keychar)
+				fmt.Printf("Pressed KeyDown: %s\n", event.Keychar)
+			} else if event.Type == "keyup" {
+				robotgo.KeyUp(event.Keychar)
+				fmt.Printf("Released KeyUp: %s\n", event.Keychar)
+			}
 
 		case types.TypeMonitorInfo:
 			payloadBytes, _ := json.Marshal(wrappedMsg.Payload)
@@ -391,9 +429,41 @@ func (c *Client) listenForMessages() {
 				continue
 			}
 
-			// Move the mouse cursor to the coordinates received from the server
-			robotgo.Move(mouseEvent.X, mouseEvent.Y)
-			fmt.Printf("Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+			// Add additional debugging
+			x, y := robotgo.GetMousePos()
+			fmt.Printf("Current mouse position before move: X: %d, Y: %d\n", x, y)
+
+			// Handle different mouse events based on action
+			if mouseEvent.Action == types.ActionMove || mouseEvent.Action == "" {
+				// Move the mouse cursor to the coordinates received from the server
+				robotgo.Move(mouseEvent.X, mouseEvent.Y)
+				fmt.Printf("MOUSE EVENT: Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+
+				// Verify the position after move
+				newX, newY := robotgo.GetMousePos()
+				if newX != mouseEvent.X || newY != mouseEvent.Y {
+					fmt.Printf("WARNING: Mouse position mismatch after move. Expected (%d,%d), got (%d,%d)\n",
+						mouseEvent.X, mouseEvent.Y, newX, newY)
+				}
+			} else if mouseEvent.Action == types.ActionDown {
+				// Handle mouse button down
+				button := string(mouseEvent.Button)
+				fmt.Printf("MOUSE EVENT: Button Down - %s at (%d,%d)\n", button, mouseEvent.X, mouseEvent.Y)
+				robotgo.Move(mouseEvent.X, mouseEvent.Y)
+				robotgo.Toggle(button, "down")
+			} else if mouseEvent.Action == types.ActionUp {
+				// Handle mouse button up
+				button := string(mouseEvent.Button)
+				fmt.Printf("MOUSE EVENT: Button Up - %s at (%d,%d)\n", button, mouseEvent.X, mouseEvent.Y)
+				robotgo.Move(mouseEvent.X, mouseEvent.Y)
+				robotgo.Toggle(button, "up")
+			} else if mouseEvent.Action == types.ActionClick {
+				// Handle mouse click
+				button := string(mouseEvent.Button)
+				fmt.Printf("MOUSE EVENT: Click - %s at (%d,%d)\n", button, mouseEvent.X, mouseEvent.Y)
+				robotgo.Move(mouseEvent.X, mouseEvent.Y)
+				robotgo.Click(button)
+			}
 
 		default:
 			fmt.Printf("Received unhandled message type '%s' from server\n", wrappedMsg.Type)

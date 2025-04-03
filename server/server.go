@@ -327,7 +327,7 @@ func (s *Server) captureAndTrackInput() {
 
 	// --- Register Mouse Hook (Signature: func(e hook.Event)) ---
 	hook.Register(hook.MouseMove, []string{}, func(e hook.Event) {
-		// log.Printf("MouseMove Event: (%d, %d)", int(e.X), int(e.Y)) // Add this for basic event checking
+		log.Printf("MouseMove Event: (%d, %d)", int(e.X), int(e.Y)) // Enable debug logging
 		x := int(e.X)
 		y := int(e.Y)
 
@@ -423,12 +423,17 @@ func (s *Server) captureAndTrackInput() {
 				}
 
 				// Send mouse event
-				mouseEvent := types.MouseEvent{X: x, Y: y}
+				mouseEvent := types.MouseEvent{
+					X:      x,
+					Y:      y,
+					Action: types.ActionMove,
+				}
 				s.clientsMutex.Lock()
 				s.lastSentMouseX = x
 				s.lastSentMouseY = y
 				s.clientsMutex.Unlock() // Release lock before sending potentially blocking network call
 
+				log.Printf("Sending mouse event to client %s: X: %d, Y: %d", activeAddr, x, y)
 				err := s.sendMessage(client, types.TypeMouseEvent, mouseEvent)
 				if err != nil {
 					log.Printf("Error sending mouse event to client %s: %v. Removing client.\n", activeAddr, err)
@@ -440,7 +445,7 @@ func (s *Server) captureAndTrackInput() {
 
 		} else {
 			// --- Currently controlling local server ---
-			// log.Printf("MouseMove: Local control, checking edge transition for (%d, %d)", x, y) // Add this log
+			log.Printf("MouseMove: Local control, checking edge transition for (%d, %d)", x, y) // Enable this log
 			switchToClient, targetClientAddr, targetLink := s.checkEdgeTransition(x, y)
 
 			if switchToClient {
@@ -505,6 +510,93 @@ func (s *Server) captureAndTrackInput() {
 				robotgo.MoveMouse(-1, -1)
 			}
 			// If local and no switch happened, do nothing (allow OS handle)
+		}
+	})
+
+	// Register mouse button events
+	hook.Register(hook.MouseDown, []string{}, func(e hook.Event) {
+		log.Printf("MouseDown Event: button %d at (%d, %d)", e.Button, int(e.X), int(e.Y))
+
+		s.clientsMutex.RLock()
+		isRemote := s.remoteInputActive
+		activeAddr := s.activeClientAddr
+		s.clientsMutex.RUnlock()
+
+		if isRemote {
+			s.clientsMutex.RLock()
+			client, ok := s.clients[activeAddr]
+			s.clientsMutex.RUnlock()
+			if !ok {
+				return
+			}
+
+			// Map button number to type
+			button := types.ButtonLeft
+			if e.Button == 2 {
+				button = types.ButtonRight
+			} else if e.Button == 3 {
+				button = types.ButtonMiddle
+			}
+
+			// Send mouse down event
+			mouseEvent := types.MouseEvent{
+				X:      int(e.X),
+				Y:      int(e.Y),
+				Button: button,
+				Action: types.ActionDown,
+			}
+
+			log.Printf("Sending mouse down to client %s: Button: %s at (%d, %d)",
+				activeAddr, button, int(e.X), int(e.Y))
+			err := s.sendMessage(client, types.TypeMouseEvent, mouseEvent)
+			if err != nil {
+				log.Printf("Error sending mouse down to client %s: %v. Removing client.",
+					activeAddr, err)
+				go s.removeClient(activeAddr)
+			}
+		}
+	})
+
+	hook.Register(hook.MouseUp, []string{}, func(e hook.Event) {
+		log.Printf("MouseUp Event: button %d at (%d, %d)", e.Button, int(e.X), int(e.Y))
+
+		s.clientsMutex.RLock()
+		isRemote := s.remoteInputActive
+		activeAddr := s.activeClientAddr
+		s.clientsMutex.RUnlock()
+
+		if isRemote {
+			s.clientsMutex.RLock()
+			client, ok := s.clients[activeAddr]
+			s.clientsMutex.RUnlock()
+			if !ok {
+				return
+			}
+
+			// Map button number to type
+			button := types.ButtonLeft
+			if e.Button == 2 {
+				button = types.ButtonRight
+			} else if e.Button == 3 {
+				button = types.ButtonMiddle
+			}
+
+			// Send mouse up event
+			mouseEvent := types.MouseEvent{
+				X:      int(e.X),
+				Y:      int(e.Y),
+				Button: button,
+				Action: types.ActionUp,
+			}
+
+			log.Printf("Sending mouse up to client %s: Button: %s at (%d, %d)",
+				activeAddr, button, int(e.X), int(e.Y))
+			err := s.sendMessage(client, types.TypeMouseEvent, mouseEvent)
+			if err != nil {
+				log.Printf("Error sending mouse up to client %s: %v. Removing client.",
+					activeAddr, err)
+				go s.removeClient(activeAddr)
+			}
 		}
 	})
 

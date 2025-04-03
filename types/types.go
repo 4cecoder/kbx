@@ -36,10 +36,32 @@ type DiscoveryMessage struct {
 
 // MouseEvent represents a mouse action
 type MouseEvent struct {
-	X int `json:"x"`
-	Y int `json:"y"`
-	// Add other fields later: Button (left, right, middle), Action (click, down, up), ScrollX, ScrollY
+	X      int         `json:"x"`
+	Y      int         `json:"y"`
+	Button MouseButton `json:"button,omitempty"` // Which button (if any)
+	Action MouseAction `json:"action,omitempty"` // What action (if any)
 }
+
+// MouseButton represents mouse buttons
+type MouseButton string
+
+const (
+	ButtonNone   MouseButton = ""
+	ButtonLeft   MouseButton = "left"
+	ButtonRight  MouseButton = "right"
+	ButtonMiddle MouseButton = "middle"
+)
+
+// MouseAction represents mouse actions
+type MouseAction string
+
+const (
+	ActionNone  MouseAction = ""
+	ActionMove  MouseAction = "move"
+	ActionDown  MouseAction = "down"
+	ActionUp    MouseAction = "up"
+	ActionClick MouseAction = "click"
+)
 
 // VirtualScreen represents a screen in the combined virtual layout
 // Used by the UI and potentially the server logic for edge detection
