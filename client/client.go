@@ -347,8 +347,9 @@ func (c *Client) listenForMessages() {
 					c.conn.Close()
 					c.conn = nil // Set conn to nil to indicate disconnected state
 				}
-				c.startReconnectLoop() // Initiate reconnection
-				return                 // Exit the current listening loop
+				log.Println("Calling startReconnectLoop from listenForMessages...") // Add log
+				c.startReconnectLoop()                                              // Initiate reconnection
+				return                                                              // Exit the current listening loop
 			}
 		}
 
@@ -402,6 +403,7 @@ func (c *Client) listenForMessages() {
 
 // startReconnectLoop starts a ticker to attempt reconnection.
 func (c *Client) startReconnectLoop() {
+	log.Println("Entered startReconnectLoop") // Add log
 	c.reconnectMutex.Lock()
 	if c.isReconnecting {
 		log.Println("Reconnect loop already running.")
@@ -423,6 +425,7 @@ func (c *Client) startReconnectLoop() {
 	c.reconnectMutex.Unlock()
 
 	go func() {
+		log.Println("Reconnect goroutine started.") // Add log
 		defer func() {
 			c.reconnectMutex.Lock()
 			if c.reconnectTicker != nil {
