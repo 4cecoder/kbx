@@ -53,7 +53,7 @@ type Client struct {
 	// ServerInfoUpdateChan chan *types.MonitorInfo
 
 	// Auto-reconnect fields
-	lastServerAddr  string        // Store the address for reconnection attempts
+	LastServerAddr  string        // Store the address for reconnection attempts (Exported)
 	reconnectTicker *time.Ticker  // Ticker for reconnection attempts
 	stopReconnect   chan struct{} // Channel to signal stopping reconnection
 	reconnectMutex  sync.Mutex    // Mutex to protect reconnect state changes
@@ -72,7 +72,7 @@ func NewClient() *Client {
 		connectedServer:   types.DiscoveryMessage{},
 		serverMonitorInfo: nil,
 		// ServerInfoUpdateChan: make(chan *types.MonitorInfo, 1),
-		lastServerAddr:  "",
+		LastServerAddr:  "",
 		reconnectTicker: nil,
 		stopReconnect:   make(chan struct{}),
 		reconnectMutex:  sync.Mutex{},
@@ -98,8 +98,8 @@ func isValidServerAddress(addr string) bool {
 	return err == nil && host != "" && port != ""
 }
 
-// stopReconnectIfNeeded stops the reconnection ticker and loop if it's running.
-func (c *Client) stopReconnectIfNeeded() {
+// StopReconnectIfNeeded stops the reconnection ticker and loop if it's running. (Exported)
+func (c *Client) StopReconnectIfNeeded() {
 	c.reconnectMutex.Lock()
 	defer c.reconnectMutex.Unlock()
 
@@ -129,7 +129,7 @@ func (c *Client) Connect(serverAddr string) error {
 		return fmt.Errorf("invalid server address format: %s", serverAddr)
 	}
 
-	c.stopReconnectIfNeeded() // Stop any previous reconnect attempts
+	c.StopReconnectIfNeeded() // Stop any previous reconnect attempts
 
 	conn, err := net.Dial("tcp", serverAddr)
 	if err != nil {
@@ -140,7 +140,7 @@ func (c *Client) Connect(serverAddr string) error {
 	c.decoder = json.NewDecoder(conn)
 
 	// Store connection info for potential reconnect
-	c.lastServerAddr = serverAddr
+	c.LastServerAddr = serverAddr
 	// Find and store the full DiscoveryMessage if found via discovery
 	c.foundServersMtx.RLock()
 	for _, msg := range c.foundServers {
@@ -408,7 +408,7 @@ func (c *Client) startReconnectLoop() {
 		c.reconnectMutex.Unlock()
 		return
 	}
-	if c.lastServerAddr == "" {
+	if c.LastServerAddr == "" {
 		log.Println("Cannot start reconnect loop: last server address unknown.")
 		c.reconnectMutex.Unlock()
 		return
@@ -418,7 +418,7 @@ func (c *Client) startReconnectLoop() {
 	c.stopReconnect = make(chan struct{})
 	c.isReconnecting = true
 	c.reconnectTicker = time.NewTicker(10 * time.Second)
-	addrToReconnect := c.lastServerAddr // Capture address for the goroutine
+	addrToReconnect := c.LastServerAddr // Capture exported address for the goroutine
 	log.Printf("Starting reconnect loop for %s...", addrToReconnect)
 	c.reconnectMutex.Unlock()
 
@@ -460,4 +460,18 @@ func (c *Client) startReconnectLoop() {
 			}
 		}
 	}()
+}
+
+// IsConnected checks if the client currently has an active connection.
+func (c *Client) IsConnected() bool {
+	c.reconnectMutex.Lock() // Use reconnect mutex for consistency, though conn check might be atomic
+	defer c.reconnectMutex.Unlock()
+	return c.conn != nil
+}
+
+// IsReconnecting checks if the client is currently in the reconnect loop.
+func (c *Client) IsReconnecting() bool {
+	c.reconnectMutex.Lock()
+	defer c.reconnectMutex.Unlock()
+	return c.isReconnecting
 }

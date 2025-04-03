@@ -410,31 +410,100 @@ func (a *AppUI) showClientStatusScreen() {
 	localHostname, _ := os.Hostname()
 	localOs := runtime.GOOS
 
-	statusText := fmt.Sprintf("Connected to: %s (%s)", serverInfo.Hostname, serverInfo.ServerIP)
-	localInfoText := fmt.Sprintf("Local: %s (%s)", localHostname, localOs)
-	remoteOsText := fmt.Sprintf("Remote OS: %s", serverInfo.OS)
+	// Initial Status Labels
+	statusLabel := widget.NewLabel(fmt.Sprintf("Connected to: %s (%s)", serverInfo.Hostname, serverInfo.ServerIP))
+	localLabel := widget.NewLabel(fmt.Sprintf("Local: %s (%s)", localHostname, localOs))
+	remoteOsLabel := widget.NewLabel(fmt.Sprintf("Remote OS: %s", serverInfo.OS))
 
-	statusLabel := widget.NewLabel(statusText)
-	localLabel := widget.NewLabel(localInfoText)
-	remoteOsLabel := widget.NewLabel(remoteOsText)
-
-	stopBtn := widget.NewButton("Disconnect", func() {
-		if a.client != nil {
-			a.client.Stop()
-			a.client = nil
-			a.mainWin.SetContent(a.createMainContent())
-		}
-	})
-
-	content := container.NewVBox(
+	// --- Button and Container Setup ---
+	// Use a placeholder for the button initially
+	buttonContainer := container.NewMax()
+	infoContainer := container.NewVBox(
 		statusLabel,
 		remoteOsLabel,
 		widget.NewSeparator(),
 		localLabel,
 		widget.NewLabel("Press ESC to disconnect (or use button)"),
-		stopBtn,
+		buttonContainer, // Placeholder for the button
 	)
-	a.mainWin.SetContent(content)
+	a.mainWin.SetContent(infoContainer)
+
+	// --- UI Polling Goroutine ---
+	stopPoller := make(chan struct{})
+	uiUpdateTicker := time.NewTicker(2 * time.Second)
+
+	go func() {
+		defer uiUpdateTicker.Stop()
+		log.Println("Starting Client UI status poller...")
+		for {
+			select {
+			case <-uiUpdateTicker.C:
+				if a.client == nil {
+					return
+				} // Exit if client is gone
+
+				connected := a.client.IsConnected()
+				reconnecting := a.client.IsReconnecting()
+
+				// Check current button type to avoid unnecessary updates
+				currentButton := buttonContainer.Objects[0] // Assume button is always the first/only object
+
+				if reconnecting {
+					statusLabel.SetText(fmt.Sprintf("Connection lost. Reconnecting to %s...", a.client.LastServerAddr))
+					// Change button to Cancel Reconnect if not already
+					if _, ok := currentButton.(*widget.Button); !ok || currentButton.(*widget.Button).Text != "Cancel Reconnect" {
+						cancelBtn := widget.NewButton("Cancel Reconnect", func() {
+							if a.client != nil {
+								a.client.StopReconnectIfNeeded()
+							}
+							close(stopPoller) // Stop this poller
+							a.startClientUI() // Go back to discovery
+						})
+						buttonContainer.Objects = []fyne.CanvasObject{cancelBtn}
+						buttonContainer.Refresh()
+					}
+				} else if connected {
+					// Ensure status shows connected (might have reconnected)
+					serverInfo := a.client.GetConnectedServerInfo() // Re-get info in case it changed
+					statusLabel.SetText(fmt.Sprintf("Connected to: %s (%s)", serverInfo.Hostname, serverInfo.ServerIP))
+					// Change button to Disconnect if not already
+					if _, ok := currentButton.(*widget.Button); !ok || currentButton.(*widget.Button).Text != "Disconnect" {
+						disconnectBtn := widget.NewButton("Disconnect", func() {
+							close(stopPoller) // Stop this poller
+							if a.client != nil {
+								a.client.Stop() // Normal stop (also stops reconnect)
+								a.client = nil
+							}
+							a.mainWin.SetContent(a.createMainContent())
+						})
+						buttonContainer.Objects = []fyne.CanvasObject{disconnectBtn}
+						buttonContainer.Refresh()
+					}
+				} else { // Not connected and not reconnecting
+					log.Println("Client disconnected and not reconnecting. Returning to discovery.")
+					close(stopPoller)
+					a.startClientUI()
+					return // Exit goroutine
+				}
+
+			case <-stopPoller:
+				log.Println("Stopping Client UI status poller.")
+				return // Exit goroutine
+			}
+		}
+	}()
+
+	// Set initial button state (must be Disconnect initially)
+	disconnectBtn := widget.NewButton("Disconnect", func() {
+		close(stopPoller) // Stop the poller
+		if a.client != nil {
+			a.client.Stop() // Normal stop
+			a.client = nil
+		}
+		a.mainWin.SetContent(a.createMainContent())
+	})
+	buttonContainer.Objects = []fyne.CanvasObject{disconnectBtn}
+	buttonContainer.Refresh()
 }
 
 // findPrimaryMonitorIndex identifies the likely primary monitor (contains 0,0 or top-leftmost).
