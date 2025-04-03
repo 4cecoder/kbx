@@ -6,37 +6,56 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
+	"kb/types"
+
+	"github.com/go-vgo/robotgo"
 	hook "github.com/robotn/gohook"
 )
 
-type KeyEvent struct {
-	Type    string `json:"type"`
-	Keychar string `json:"keychar"`
-	State   string `json:"state"`
-}
-
-// DiscoveryMessage defines the structure for UDP broadcast messages
-type DiscoveryMessage struct {
-	Type     string `json:"type"`
-	ServerIP string `json:"server_ip"`
-	Port     int    `json:"port"`
-	OS       string `json:"os"`
-	Hostname string `json:"hostname"`
-}
+// Removed local type definitions - now in kb/types
 
 const (
-	DiscoveryAddr     = "239.0.0.1:9999" // Example multicast address
-	DiscoveryType     = "KB_SHARE_DISCOVERY_V1"
+	DiscoveryAddr     = "239.0.0.1:9999"
+	DiscoveryType     = "KB_SHARE_DISCOVERY_V1" // Use string literal here
 	BroadcastInterval = 5 * time.Second
 )
 
+type ClientConnection struct {
+	Conn        net.Conn
+	Encoder     *json.Encoder
+	Decoder     *json.Decoder
+	MonitorInfo *types.MonitorInfo // Store client monitor info when received
+}
+
 type Server struct {
-	listener      net.Listener
-	clients       []net.Conn
+	listener net.Listener
+	// Use a map for easier client management [RemoteAddr] -> ClientConnection
+	clients       map[string]*ClientConnection
+	clientsMutex  sync.RWMutex // Mutex to protect the clients map
 	stopChan      chan struct{}
-	discoveryStop chan struct{} // Channel to stop discovery broadcast
+	discoveryStop chan struct{}
+	// Channel to signal UI about new client connections / monitor info updates
+	ClientUpdateChan chan *ClientConnection
+}
+
+// getLocalMonitorInfo gathers information about the server's monitors
+func getLocalMonitorInfo() types.MonitorInfo {
+	hostname, _ := os.Hostname()
+	osStr := runtime.GOOS
+	numDisplays := robotgo.DisplaysNum()
+	screens := make([]types.ScreenRect, 0, numDisplays)
+	for i := 0; i < numDisplays; i++ {
+		x, y, w, h := robotgo.GetDisplayBounds(i)
+		screens = append(screens, types.ScreenRect{ID: i, X: x, Y: y, W: w, H: h})
+	}
+	return types.MonitorInfo{
+		Hostname: hostname,
+		OS:       osStr,
+		Screens:  screens,
+	}
 }
 
 func NewServer(port int) (*Server, error) {
@@ -46,64 +65,156 @@ func NewServer(port int) (*Server, error) {
 	}
 
 	return &Server{
-		listener:      listener,
-		clients:       make([]net.Conn, 0),
-		stopChan:      make(chan struct{}),
-		discoveryStop: make(chan struct{}),
+		listener:         listener,
+		clients:          make(map[string]*ClientConnection),
+		stopChan:         make(chan struct{}),
+		discoveryStop:    make(chan struct{}),
+		ClientUpdateChan: make(chan *ClientConnection, 5), // Buffered channel for UI updates
 	}, nil
+}
+
+// Send a wrapped message to a specific client
+func (s *Server) sendMessage(client *ClientConnection, msgType types.MessageType, payload interface{}) error {
+	wrappedMsg := types.WrappedMessage{
+		Type:    msgType,
+		Payload: payload,
+	}
+	// Use the client's dedicated encoder
+	return client.Encoder.Encode(wrappedMsg)
 }
 
 func (s *Server) Start() {
 	go s.acceptConnections()
 	go s.captureKeyboard()
-	go s.startDiscoveryBroadcaster() // Start broadcasting presence
+	go s.startDiscoveryBroadcaster()
 }
 
 func (s *Server) Stop() {
 	close(s.stopChan)
-	close(s.discoveryStop) // Signal discovery broadcast to stop
+	close(s.discoveryStop)
 	s.listener.Close()
+	s.clientsMutex.Lock()
 	for _, client := range s.clients {
-		client.Close()
+		client.Conn.Close()
 	}
+	s.clients = make(map[string]*ClientConnection) // Clear map
+	s.clientsMutex.Unlock()
+	close(s.ClientUpdateChan) // Close update channel
 }
 
 func (s *Server) acceptConnections() {
+	serverMonitorInfo := getLocalMonitorInfo()
+
 	for {
-		select {
-		case <-s.stopChan:
-			return
-		default:
-			conn, err := s.listener.Accept()
-			if err != nil {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			select {
+			case <-s.stopChan:
+				return // Server is stopping
+			default:
 				fmt.Printf("Error accepting connection: %v\n", err)
 				continue
 			}
-			s.clients = append(s.clients, conn)
-			// Store client IP address if needed for identification
-			// clientAddr := conn.RemoteAddr().String()
-			fmt.Printf("New client connected: %s\n", conn.RemoteAddr().String())
+		}
+
+		clientAddr := conn.RemoteAddr().String()
+		clientConn := &ClientConnection{
+			Conn:    conn,
+			Encoder: json.NewEncoder(conn),
+			Decoder: json.NewDecoder(conn),
+		}
+
+		s.clientsMutex.Lock()
+		s.clients[clientAddr] = clientConn
+		s.clientsMutex.Unlock()
+
+		fmt.Printf("New client connected: %s\n", clientAddr)
+
+		// Send server monitor info immediately
+		err = s.sendMessage(clientConn, types.TypeMonitorInfo, serverMonitorInfo)
+		if err != nil {
+			fmt.Printf("Error sending server monitor info to %s: %v\n", clientAddr, err)
+			s.removeClient(clientAddr)
+			continue
+		}
+
+		// Start a goroutine to handle messages from this client
+		go s.handleClientMessages(clientConn)
+	}
+}
+
+// handleClientMessages runs in a goroutine for each connected client
+func (s *Server) handleClientMessages(client *ClientConnection) {
+	clientAddr := client.Conn.RemoteAddr().String()
+	defer s.removeClient(clientAddr)
+
+	for {
+		var wrappedMsg types.WrappedMessage
+		err := client.Decoder.Decode(&wrappedMsg)
+		if err != nil {
+			select {
+			case <-s.stopChan: // Check if server is stopping
+				return
+			default:
+				if err != nil {
+					fmt.Printf("Error decoding message from %s: %v\n", clientAddr, err)
+					return // Close connection on decode error
+				}
+			}
+		}
+
+		switch wrappedMsg.Type {
+		case types.TypeMonitorInfo:
+			// Need to decode the payload map into the correct struct
+			payloadBytes, _ := json.Marshal(wrappedMsg.Payload)
+			var monitorInfo types.MonitorInfo
+			err := json.Unmarshal(payloadBytes, &monitorInfo)
+			if err != nil {
+				fmt.Printf("Error unmarshaling MonitorInfo from %s: %v\n", clientAddr, err)
+				continue
+			}
+			fmt.Printf("Received MonitorInfo from %s: %+v\n", clientAddr, monitorInfo)
+			s.clientsMutex.Lock()
+			client.MonitorInfo = &monitorInfo // Store it
+			s.clientsMutex.Unlock()
+			// Signal UI about the update
+			s.ClientUpdateChan <- client
+
+		// Handle other message types later (e.g., acknowledgements, mouse data)
+		default:
+			fmt.Printf("Received unhandled message type '%s' from %s\n", wrappedMsg.Type, clientAddr)
 		}
 	}
+}
+
+// removeClient closes connection and removes client from the map
+func (s *Server) removeClient(addr string) {
+	s.clientsMutex.Lock()
+	client, ok := s.clients[addr]
+	if ok {
+		client.Conn.Close()
+		delete(s.clients, addr)
+		fmt.Printf("Client disconnected: %s\n", addr)
+	}
+	s.clientsMutex.Unlock()
+	// Optionally send another update to UI? Maybe not needed if UI polls.
 }
 
 func (s *Server) captureKeyboard() {
 	hook.Register(hook.KeyDown, []string{}, func(e hook.Event) {
 		fmt.Printf("KeyDown: %s\n", e.Keychar)
-		event := KeyEvent{
+		event := types.KeyEvent{
 			Type:    "keydown",
 			Keychar: string(e.Keychar),
-			State:   "down",
 		}
 		s.broadcastEvent(event)
 	})
 
 	hook.Register(hook.KeyUp, []string{}, func(e hook.Event) {
 		fmt.Printf("KeyUp: %s\n", e.Keychar)
-		event := KeyEvent{
+		event := types.KeyEvent{
 			Type:    "keyup",
 			Keychar: string(e.Keychar),
-			State:   "up",
 		}
 		s.broadcastEvent(event)
 	})
@@ -120,24 +231,23 @@ func (s *Server) captureKeyboard() {
 	}
 }
 
-func (s *Server) broadcastEvent(event KeyEvent) {
-	data, err := json.Marshal(event)
-	if err != nil {
-		fmt.Printf("Error marshaling event: %v\n", err)
-		return
+// broadcastEvent sends an event to all connected clients
+func (s *Server) broadcastEvent(event types.KeyEvent) {
+	s.clientsMutex.RLock() // Use RLock for reading the map
+	defer s.clientsMutex.RUnlock()
+
+	if len(s.clients) == 0 {
+		return // No clients to send to
 	}
 
-	// Remove disconnected clients
-	activeClients := make([]net.Conn, 0)
-	for _, client := range s.clients {
-		_, err := client.Write(data)
+	for addr, client := range s.clients {
+		err := s.sendMessage(client, types.TypeKeyEvent, event)
 		if err != nil {
-			client.Close()
-			continue
+			fmt.Printf("Error sending event to client %s: %v. Removing client.\n", addr, err)
+			// Need to handle removal carefully - maybe schedule removal outside RLock
+			go s.removeClient(addr) // Remove client in a separate goroutine
 		}
-		activeClients = append(activeClients, client)
 	}
-	s.clients = activeClients
 }
 
 // startDiscoveryBroadcaster periodically sends out UDP multicast messages
@@ -162,7 +272,11 @@ func (s *Server) startDiscoveryBroadcaster() {
 		// Fallback or handle error appropriately
 		localIP = "UNKNOWN"
 	}
-	serverPort := s.listener.Addr().(*net.TCPAddr).Port
+	serverPort := s.GetListenPort()
+	if serverPort == -1 {
+		fmt.Println("Error: Cannot determine server port for discovery broadcast.")
+		return
+	}
 
 	ticker := time.NewTicker(BroadcastInterval)
 	defer ticker.Stop()
@@ -172,8 +286,8 @@ func (s *Server) startDiscoveryBroadcaster() {
 	for {
 		select {
 		case <-ticker.C:
-			msg := DiscoveryMessage{
-				Type:     DiscoveryType,
+			msg := types.DiscoveryMessage{
+				Type:     types.DiscoveryType,
 				ServerIP: localIP,
 				Port:     serverPort,
 				OS:       runtime.GOOS,

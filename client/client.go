@@ -4,127 +4,202 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"runtime"
 	"time"
+
+	"kb/types"
 
 	"github.com/go-vgo/robotgo"
 )
 
-type KeyEvent struct {
-	Type    string `json:"type"`
-	Keychar string `json:"keychar"`
-	State   string `json:"state"`
-}
-
-// DiscoveryMessage defines the structure for UDP broadcast messages
-type DiscoveryMessage struct {
-	Type     string `json:"type"`
-	ServerIP string `json:"server_ip"`
-	Port     int    `json:"port"`
-	OS       string `json:"os"`
-	Hostname string `json:"hostname"`
-}
+// Removed local type definitions
 
 const (
-	DiscoveryAddr = "239.0.0.1:9999" // Must match server
+	DiscoveryAddr = "239.0.0.1:9999"
 	DiscoveryType = "KB_SHARE_DISCOVERY_V1"
 )
 
-type Client struct {
-	conn            net.Conn
-	stopChan        chan struct{}
-	discoveryStop   chan struct{}               // Channel to stop discovery listener
-	foundServers    map[string]DiscoveryMessage // Map to store found servers [ip:port] -> message
-	connectedServer DiscoveryMessage            // Store info about the server we connected to
-}
-
-// NewClient creates a client instance but doesn't connect yet.
-// It primarily initializes structures needed for discovery.
-func NewClient() *Client {
-	return &Client{
-		conn:          nil, // Connection established later
-		stopChan:      make(chan struct{}),
-		discoveryStop: make(chan struct{}),
-		foundServers:  make(map[string]DiscoveryMessage),
+// getLocalMonitorInfo gathers information about the client's monitors
+func getLocalMonitorInfo() types.MonitorInfo {
+	hostname, _ := os.Hostname()
+	osStr := runtime.GOOS
+	numDisplays := robotgo.DisplaysNum()
+	screens := make([]types.ScreenRect, 0, numDisplays)
+	for i := 0; i < numDisplays; i++ {
+		x, y, w, h := robotgo.GetDisplayBounds(i)
+		screens = append(screens, types.ScreenRect{ID: i, X: x, Y: y, W: w, H: h})
+	}
+	return types.MonitorInfo{
+		Hostname: hostname,
+		OS:       osStr,
+		Screens:  screens,
 	}
 }
 
-// Connect dials the specified server address.
+type Client struct {
+	conn              net.Conn
+	encoder           *json.Encoder // Add encoder/decoder
+	decoder           *json.Decoder
+	stopChan          chan struct{}
+	discoveryStop     chan struct{}
+	foundServers      map[string]types.DiscoveryMessage
+	connectedServer   types.DiscoveryMessage // Info from discovery
+	serverMonitorInfo *types.MonitorInfo     // Monitor info received from server
+	// Channel to notify UI about received server monitor info?
+	// ServerInfoUpdateChan chan *types.MonitorInfo
+}
+
+func NewClient() *Client {
+	return &Client{
+		conn:              nil,
+		encoder:           nil,
+		decoder:           nil,
+		stopChan:          make(chan struct{}),
+		discoveryStop:     make(chan struct{}),
+		foundServers:      make(map[string]types.DiscoveryMessage),
+		serverMonitorInfo: nil,
+		// ServerInfoUpdateChan: make(chan *types.MonitorInfo, 1),
+	}
+}
+
+// sendMessage sends a wrapped message to the server
+func (c *Client) sendMessage(msgType types.MessageType, payload interface{}) error {
+	if c.encoder == nil {
+		return fmt.Errorf("client not connected")
+	}
+	wrappedMsg := types.WrappedMessage{
+		Type:    msgType,
+		Payload: payload,
+	}
+	return c.encoder.Encode(wrappedMsg)
+}
+
 func (c *Client) Connect(serverAddr string) error {
-	// Close existing connection if any
 	if c.conn != nil {
 		c.conn.Close()
 	}
 
-	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second) // Add timeout
+	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
 	if err != nil {
 		return err
 	}
 	c.conn = conn
+	c.encoder = json.NewEncoder(conn)
+	c.decoder = json.NewDecoder(conn)
 
-	// If we found this server via discovery, store its info
 	if serverInfo, ok := c.foundServers[serverAddr]; ok {
 		c.connectedServer = serverInfo
 	} else {
-		// TODO: Maybe implement a handshake to get server info if connected manually?
-		c.connectedServer = DiscoveryMessage{ServerIP: serverAddr, Hostname: "Manual Connection"} // Placeholder
+		c.connectedServer = types.DiscoveryMessage{ServerIP: serverAddr, Hostname: "Manual Connection"}
 	}
 
-	go c.receiveEvents()
+	// Send client monitor info immediately after connecting
+	clientMonitorInfo := getLocalMonitorInfo()
+	err = c.sendMessage(types.TypeMonitorInfo, clientMonitorInfo)
+	if err != nil {
+		fmt.Printf("Error sending client monitor info: %v\n", err)
+		c.conn.Close() // Close connection if initial send fails
+		return err
+	}
+
+	go c.receiveMessages()
 	return nil
 }
 
 func (c *Client) Stop() {
-	close(c.stopChan)      // Signal receiver to stop
-	close(c.discoveryStop) // Signal discovery listener to stop
-	if c.conn != nil {     // Check if conn was initialized
+	close(c.stopChan)
+	close(c.discoveryStop)
+	if c.conn != nil {
 		c.conn.Close()
-		c.conn = nil // Ensure connection is marked as closed
+		c.conn = nil
+		c.encoder = nil
+		c.decoder = nil
 	}
-	// Clear found servers maybe? Or keep them for next time?
-	// c.foundServers = make(map[string]DiscoveryMessage)
+	c.serverMonitorInfo = nil // Clear received info
+	// close(c.ServerInfoUpdateChan) // Close update channel
 }
 
-func (c *Client) receiveEvents() {
-	decoder := json.NewDecoder(c.conn)
+// receiveMessages handles incoming wrapped messages from the server
+func (c *Client) receiveMessages() {
+	defer func() {
+		if c.conn != nil {
+			c.conn.Close() // Ensure connection is closed on exit
+		}
+	}()
+
 	for {
 		select {
 		case <-c.stopChan:
 			return
 		default:
-			var event KeyEvent
-			err := decoder.Decode(&event)
+			if c.decoder == nil {
+				// Connection might have been closed, wait briefly
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			var wrappedMsg types.WrappedMessage
+			err := c.decoder.Decode(&wrappedMsg)
 			if err != nil {
-				fmt.Printf("Error decoding event: %v\n", err)
-				return
+				select {
+				case <-c.stopChan: // Check if stopping
+					return
+				default:
+					fmt.Printf("Error decoding message from server: %v\n", err)
+					return // Exit goroutine on error
+				}
 			}
 
-			// Replay the keyboard event
-			if event.Type == "keydown" {
-				robotgo.KeyTap(event.Keychar)
-				fmt.Printf("Replayed KeyDown: %s\n", event.Keychar)
-			} else if event.Type == "keyup" {
-				fmt.Printf("Received KeyUp: %s (usually auto-handled)\n", event.Keychar)
+			switch wrappedMsg.Type {
+			case types.TypeKeyEvent:
+				payloadBytes, _ := json.Marshal(wrappedMsg.Payload)
+				var event types.KeyEvent
+				err := json.Unmarshal(payloadBytes, &event)
+				if err != nil {
+					fmt.Printf("Error unmarshaling KeyEvent: %v\n", err)
+					continue
+				}
+				// Replay the keyboard event
+				if event.Type == "keydown" {
+					robotgo.KeyTap(event.Keychar)
+					fmt.Printf("Replayed KeyDown: %s\n", event.Keychar)
+				} // KeyUp is ignored for now
+
+			case types.TypeMonitorInfo:
+				payloadBytes, _ := json.Marshal(wrappedMsg.Payload)
+				var monitorInfo types.MonitorInfo
+				err := json.Unmarshal(payloadBytes, &monitorInfo)
+				if err != nil {
+					fmt.Printf("Error unmarshaling MonitorInfo from server: %v\n", err)
+					continue
+				}
+				fmt.Printf("Received Server MonitorInfo: %+v\n", monitorInfo)
+				c.serverMonitorInfo = &monitorInfo
+				// Notify UI if channel exists
+				// select { case c.ServerInfoUpdateChan <- c.serverMonitorInfo: default: }
+
+			default:
+				fmt.Printf("Received unhandled message type '%s' from server\n", wrappedMsg.Type)
 			}
 		}
 	}
 }
 
-// StartDiscoveryListener listens for server broadcast messages
+// StartDiscoveryListener (use types.DiscoveryMessage, otherwise unchanged)
 func (c *Client) StartDiscoveryListener() {
+	// ... (resolve UDP, listen multicast - unchanged) ...
 	addr, err := net.ResolveUDPAddr("udp", DiscoveryAddr)
 	if err != nil {
 		fmt.Printf("Error resolving UDP address for discovery: %v\n", err)
 		return
 	}
-
-	// Listen on all interfaces for multicast
 	listener, err := net.ListenMulticastUDP("udp", nil, addr)
 	if err != nil {
 		fmt.Printf("Error listening for UDP discovery: %v\n", err)
 		return
 	}
 	defer listener.Close()
-	listener.SetReadBuffer(1024) // Set a reasonable buffer size
+	listener.SetReadBuffer(1024)
 
 	fmt.Println("Starting discovery listener...")
 	buf := make([]byte, 1024)
@@ -135,14 +210,12 @@ func (c *Client) StartDiscoveryListener() {
 			fmt.Println("Stopping discovery listener.")
 			return
 		default:
-			// Set a deadline to allow checking the stop channel
 			listener.SetReadDeadline(time.Now().Add(1 * time.Second))
 			n, _, err := listener.ReadFromUDP(buf)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue // It's just a timeout, loop again
+					continue
 				}
-				// Don't spam errors if the listener is closed intentionally
 				select {
 				case <-c.discoveryStop:
 					return
@@ -152,31 +225,31 @@ func (c *Client) StartDiscoveryListener() {
 				continue
 			}
 
-			var msg DiscoveryMessage
+			var msg types.DiscoveryMessage // Use type from package
 			err = json.Unmarshal(buf[:n], &msg)
 			if err != nil {
-				// fmt.Printf("Error unmarshaling discovery message: %v\n", err)
 				continue
 			}
 
 			if msg.Type == DiscoveryType {
 				serverAddr := fmt.Sprintf("%s:%d", msg.ServerIP, msg.Port)
 				c.foundServers[serverAddr] = msg
-				// Optional: Notify the UI about the found server
-				// fmt.Printf("Discovered Server: %s (%s - %s)\n", serverAddr, msg.Hostname, msg.OS)
 			}
 		}
 	}
 }
 
-// GetFoundServers returns the list of discovered servers
-func (c *Client) GetFoundServers() map[string]DiscoveryMessage {
-	// Return a copy to avoid race conditions if UI modifies it?
-	// For now, direct access is simpler but be mindful.
+// GetFoundServers (use types.DiscoveryMessage, otherwise unchanged)
+func (c *Client) GetFoundServers() map[string]types.DiscoveryMessage {
 	return c.foundServers
 }
 
-// GetConnectedServerInfo returns info about the server we are connected to.
-func (c *Client) GetConnectedServerInfo() DiscoveryMessage {
+// GetConnectedServerInfo (use types.DiscoveryMessage, otherwise unchanged)
+func (c *Client) GetConnectedServerInfo() types.DiscoveryMessage {
 	return c.connectedServer
+}
+
+// GetReceivedServerMonitorInfo returns the monitor info received from the server.
+func (c *Client) GetReceivedServerMonitorInfo() *types.MonitorInfo {
+	return c.serverMonitorInfo
 }
