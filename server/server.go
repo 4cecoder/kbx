@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/go-vgo/robotgo"
 	hook "github.com/robotn/gohook"
+	"golang.org/x/exp/constraints"
 )
 
 // Removed local type definitions - now in kb/types
@@ -44,11 +46,13 @@ type Server struct {
 	// Input Redirection State
 	remoteInputActive bool   // Is input currently directed to a client?
 	activeClientAddr  string // Which client address is receiving input?
+	lastSentMouseX    int    // Store last sent/calculated coords for return check
+	lastSentMouseY    int
 
 	// Layout Management
-	virtualLayouts      map[string]map[string]*types.VirtualScreen // map[clientAddr][screenKey]*VirtualScreen
-	virtualLayoutsMutex sync.RWMutex                               // Use RWMutex
-	serverScreens       []types.ScreenRect                         // Cache server screens for faster access
+	layoutConfigs      map[string]*types.LayoutConfiguration // map[clientAddr]*LayoutConfiguration
+	layoutConfigsMutex sync.RWMutex
+	serverScreens      []types.ScreenRect
 }
 
 // getLocalMonitorInfo gathers information about the server's monitors
@@ -82,8 +86,8 @@ func NewServer(port int) (*Server, error) {
 		ClientUpdateChan:  make(chan *ClientConnection, 5),
 		remoteInputActive: false,
 		activeClientAddr:  "",
-		virtualLayouts:    make(map[string]map[string]*types.VirtualScreen),
-		serverScreens:     getLocalMonitorInfo().Screens, // Cache server screens on startup
+		layoutConfigs:     make(map[string]*types.LayoutConfiguration),
+		serverScreens:     getLocalMonitorInfo().Screens,
 	}
 	return s, nil
 }
@@ -214,10 +218,10 @@ func (s *Server) removeClient(addr string) {
 	}
 	s.clientsMutex.Unlock()
 
-	// Remove layout info for the disconnected client
-	s.virtualLayoutsMutex.Lock()
-	delete(s.virtualLayouts, addr)
-	s.virtualLayoutsMutex.Unlock()
+	// Remove layout config for the disconnected client
+	s.layoutConfigsMutex.Lock()
+	delete(s.layoutConfigs, addr)
+	s.layoutConfigsMutex.Unlock()
 
 	// If this was the active client, reset remote input state
 	s.clientsMutex.Lock() // Use main mutex for state vars
@@ -409,87 +413,189 @@ func (s *Server) GetListenPort() int {
 	return -1
 }
 
-// checkEdgeTransition checks if the current mouse position triggers a transition
-// to a client screen based on the virtual layout.
-// Returns: switchToClient bool, targetClientAddr string, targetScreen *types.VirtualScreen
-// NOTE: Coordinate mapping logic is currently placeholder and needs implementation.
-func (s *Server) checkEdgeTransition(x, y int) (bool, string, *types.VirtualScreen) {
+// checkEdgeTransition checks if the physical server mouse position (x, y)
+// matches a configured outgoing edge link.
+// Returns: switchToClient bool, targetClientAddr string, targetLink types.EdgeLink
+func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
 	serverScreens := s.GetServerScreens()
+	serverHostname, _ := os.Hostname()
 
 	for _, serverScreen := range serverScreens {
 		const edgeBuffer = 1
+		currentEdge := types.ScreenEdge("")
 
-		onLeftEdge := x <= serverScreen.X+edgeBuffer && x >= serverScreen.X
-		onRightEdge := x >= serverScreen.X+serverScreen.W-edgeBuffer && x <= serverScreen.X+serverScreen.W
-		onTopEdge := y <= serverScreen.Y+edgeBuffer && y >= serverScreen.Y
-		onBottomEdge := y >= serverScreen.Y+serverScreen.H-edgeBuffer && y <= serverScreen.Y+serverScreen.H
-
-		if !(onLeftEdge || onRightEdge || onTopEdge || onBottomEdge) {
-			continue
+		if x <= serverScreen.X+edgeBuffer && x >= serverScreen.X {
+			currentEdge = types.EdgeLeft
+		} else if x >= serverScreen.X+serverScreen.W-edgeBuffer && x <= serverScreen.X+serverScreen.W {
+			currentEdge = types.EdgeRight
+		} else if y <= serverScreen.Y+edgeBuffer && y >= serverScreen.Y {
+			currentEdge = types.EdgeTop
+		} else if y >= serverScreen.Y+serverScreen.H-edgeBuffer && y <= serverScreen.Y+serverScreen.H {
+			currentEdge = types.EdgeBottom
 		}
 
-		s.virtualLayoutsMutex.RLock()
-		for clientAddr, layout := range s.virtualLayouts {
-			if layout == nil {
+		if currentEdge == "" {
+			continue // Not on an edge of this screen
+		}
+
+		// Check configurations for all clients
+		s.layoutConfigsMutex.RLock()
+		for clientAddr, config := range s.layoutConfigs {
+			if config == nil {
 				continue
 			}
 
-			for _, virtualScreen := range layout {
-				if virtualScreen.IsServer {
-					continue
-				}
+			for _, link := range config.Links {
+				// Check if the link originates from the current server screen edge
+				if link.FromHostname == serverHostname &&
+					link.FromScreenID == serverScreen.ID &&
+					link.FromEdge == currentEdge {
 
-				vX := virtualScreen.Position.X
-				vY := virtualScreen.Position.Y
-				vW := virtualScreen.Size.Width
-				vH := virtualScreen.Size.Height
-
-				// We need a way to get the corresponding virtual position for the server screen
-				serverHostname, _ := os.Hostname()                                  // Assuming server hostname is needed for key
-				serverScreenKey := types.ScreenKey(serverHostname, serverScreen.ID) // Use types.ScreenKey
-				virtualServerScreen, ok := layout[serverScreenKey]
-				if !ok {
-					continue
-				}
-				vServerX := virtualServerScreen.Position.X
-				vServerY := virtualServerScreen.Position.Y
-				vServerW := virtualServerScreen.Size.Width
-				vServerH := virtualServerScreen.Size.Height
-
-				adjacent := false
-				tolerance := float32(5.0) // Adjacency tolerance
-				if onRightEdge && vX > vServerX && (vX-(vServerX+vServerW)) < tolerance {
-					if max(vServerY, vY) < min(vServerY+vServerH, vY+vH) {
-						adjacent = true
-					}
-				} else if onLeftEdge && (vX+vW) < vServerX && (vServerX-(vX+vW)) < tolerance {
-					if max(vServerY, vY) < min(vServerY+vServerH, vY+vH) {
-						adjacent = true
-					}
-				} else if onBottomEdge && vY > vServerY && (vY-(vServerY+vServerH)) < tolerance {
-					if max(vServerX, vX) < min(vServerX+vServerW, vX+vW) {
-						adjacent = true
-					}
-				} else if onTopEdge && (vY+vH) < vServerY && (vServerY-(vY+vH)) < tolerance {
-					if max(vServerX, vX) < min(vServerX+vServerW, vX+vW) {
-						adjacent = true
-					}
-				}
-
-				if adjacent {
-					log.Printf("Edge transition detected: Server screen %d to Client %s screen %d\n", serverScreen.ID, clientAddr, virtualScreen.ID)
-					s.virtualLayoutsMutex.RUnlock()
-					return true, clientAddr, virtualScreen
+					// Found a matching outgoing link
+					log.Printf("Outgoing edge match: Server %d/%s -> Client %s Screen %d/%s\n",
+						serverScreen.ID, currentEdge, link.ToHostname, link.ToScreenID, link.ToEdge)
+					s.layoutConfigsMutex.RUnlock()
+					return true, clientAddr, link
 				}
 			}
 		}
-		s.virtualLayoutsMutex.RUnlock()
+		s.layoutConfigsMutex.RUnlock()
 	}
 
-	return false, "", nil
+	return false, "", types.EdgeLink{} // No transition detected
 }
 
-// trackMouseInput continuously monitors the mouse and sends events or checks for transitions.
+// checkReturnTransition checks if the last simulated client position (x, y)
+// matches a configured incoming edge link.
+// Returns: switchToServer bool, targetServerScreen types.ScreenRect, targetServerEdge types.ScreenEdge
+func (s *Server) checkReturnTransition(clientX, clientY int, clientAddr string) (bool, types.ScreenRect, types.ScreenEdge) {
+	s.layoutConfigsMutex.RLock()
+	config, configOk := s.layoutConfigs[clientAddr]
+	s.layoutConfigsMutex.RUnlock()
+	if !configOk || config == nil {
+		return false, types.ScreenRect{}, "" // No config for this client
+	}
+
+	s.clientsMutex.RLock()
+	clientConn, clientOk := s.clients[clientAddr]
+	s.clientsMutex.RUnlock()
+	if !clientOk || clientConn.MonitorInfo == nil {
+		return false, types.ScreenRect{}, "" // Client disconnected or no monitor info
+	}
+
+	clientHostname := clientConn.MonitorInfo.Hostname
+
+	for _, clientScreen := range clientConn.MonitorInfo.Screens {
+		const edgeBuffer = 1
+		currentEdge := types.ScreenEdge("")
+
+		// Check if the *simulated* client coords are at the edge of *this* client screen
+		if clientX <= clientScreen.X+edgeBuffer && clientX >= clientScreen.X {
+			currentEdge = types.EdgeLeft
+		} else if clientX >= clientScreen.X+clientScreen.W-edgeBuffer && clientX <= clientScreen.X+clientScreen.W {
+			currentEdge = types.EdgeRight
+		} else if clientY <= clientScreen.Y+edgeBuffer && clientY >= clientScreen.Y {
+			currentEdge = types.EdgeTop
+		} else if clientY >= clientScreen.Y+clientScreen.H-edgeBuffer && clientY <= clientScreen.Y+clientScreen.H {
+			currentEdge = types.EdgeBottom
+		}
+
+		if currentEdge == "" {
+			continue
+		}
+
+		// Check the config for links originating from this client screen edge
+		for _, link := range config.Links {
+			if link.FromHostname == clientHostname &&
+				link.FromScreenID == clientScreen.ID &&
+				link.FromEdge == currentEdge {
+
+				// Found a link pointing back to the server
+				serverHostname, _ := os.Hostname()
+				if link.ToHostname == serverHostname {
+					// Find the target server screen
+					for _, serverScreen := range s.GetServerScreens() {
+						if serverScreen.ID == link.ToScreenID {
+							log.Printf("Incoming edge match: Client %s Screen %d/%s -> Server Screen %d/%s\n",
+								clientHostname, clientScreen.ID, currentEdge, serverScreen.ID, link.ToEdge)
+							return true, serverScreen, link.ToEdge
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return false, types.ScreenRect{}, ""
+}
+
+// Simple helper functions (Go 1.21+ has built-in max/min)
+func max[T constraints.Ordered](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min[T constraints.Ordered](a, b T) T {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// calculateEntryPoint calculates the cursor position on the target screen's edge,
+// based on the relative position on the source edge.
+func calculateEntryPoint(sourceX, sourceY int, sourceScreen types.ScreenRect, sourceEdge types.ScreenEdge,
+	targetScreen types.ScreenRect, targetEdge types.ScreenEdge) (targetX, targetY int) {
+
+	var relativePos float64 // Position along the edge (0.0 to 1.0)
+
+	// Calculate relative position on the source edge
+	switch sourceEdge {
+	case types.EdgeLeft, types.EdgeRight:
+		if sourceScreen.H > 0 {
+			relativePos = float64(sourceY-sourceScreen.Y) / float64(sourceScreen.H)
+		} else {
+			relativePos = 0.5 // Avoid division by zero
+		}
+	case types.EdgeTop, types.EdgeBottom:
+		if sourceScreen.W > 0 {
+			relativePos = float64(sourceX-sourceScreen.X) / float64(sourceScreen.W)
+		} else {
+			relativePos = 0.5
+		}
+	}
+	relativePos = math.Max(0.0, math.Min(1.0, relativePos)) // Clamp between 0 and 1
+
+	// Calculate absolute position on the target edge
+	const entryOffset = 3 // Pixels inset from the edge
+	switch targetEdge {
+	case types.EdgeLeft:
+		targetX = targetScreen.X + entryOffset
+		targetY = targetScreen.Y + int(relativePos*float64(targetScreen.H))
+	case types.EdgeRight:
+		targetX = targetScreen.X + targetScreen.W - entryOffset
+		targetY = targetScreen.Y + int(relativePos*float64(targetScreen.H))
+	case types.EdgeTop:
+		targetX = targetScreen.X + int(relativePos*float64(targetScreen.W))
+		targetY = targetScreen.Y + entryOffset
+	case types.EdgeBottom:
+		targetX = targetScreen.X + int(relativePos*float64(targetScreen.W))
+		targetY = targetScreen.Y + targetScreen.H - entryOffset
+	default:
+		// Should not happen, default to center of target screen
+		targetX = targetScreen.X + targetScreen.W/2
+		targetY = targetScreen.Y + targetScreen.H/2
+	}
+
+	// Clamp coordinates to be within the target screen bounds (safety)
+	targetX = max(targetScreen.X, min(targetX, targetScreen.X+targetScreen.W-1))
+	targetY = max(targetScreen.Y, min(targetY, targetScreen.Y+targetScreen.H-1))
+
+	return targetX, targetY
+}
+
 func (s *Server) trackMouseInput() {
 	log.Println("Starting mouse input tracking...")
 	defer log.Println("Stopping mouse input tracking.")
@@ -499,23 +605,44 @@ func (s *Server) trackMouseInput() {
 		case <-s.stopChan:
 			return
 		default:
-			// Get state (read lock)
 			s.clientsMutex.RLock()
 			isRemote := s.remoteInputActive
 			activeAddr := s.activeClientAddr
 			client, clientExists := s.clients[activeAddr]
+			lastX := s.lastSentMouseX
+			lastY := s.lastSentMouseY
 			s.clientsMutex.RUnlock()
 
-			// Get current mouse position
 			x, y := robotgo.Location()
 
 			if isRemote && clientExists {
 				// --- Currently controlling remote client ---
+				switchToServer, targetServerScreen, targetServerEdge := s.checkReturnTransition(lastX, lastY, activeAddr)
 
-				// TODO: Check if position indicates transition *back* to server.
+				if switchToServer {
+					log.Println("Switching input back to server.")
+					entryX, entryY := calculateEntryPoint(lastX, lastY,
+						client.MonitorInfo.Screens[0], /* TODO: Find correct client screen */
+						"unknown",                     /* TODO: Need client exit edge from link */
+						targetServerScreen, targetServerEdge)
 
-				// Send mouse event
+					s.clientsMutex.Lock()
+					s.remoteInputActive = false
+					s.activeClientAddr = ""
+					s.clientsMutex.Unlock()
+
+					robotgo.Move(entryX, entryY) // Move server cursor to entry point
+					continue                     // Skip sending this event to client
+				}
+
+				// Send mouse event (use current physical server coords for now)
+				// TODO: Consider if client needs relative or absolute coords?
 				mouseEvent := types.MouseEvent{X: x, Y: y}
+				s.clientsMutex.Lock() // Lock needed to update last sent coords
+				s.lastSentMouseX = x
+				s.lastSentMouseY = y
+				s.clientsMutex.Unlock()
+
 				err := s.sendMessage(client, types.TypeMouseEvent, mouseEvent)
 				if err != nil {
 					log.Printf("Error sending mouse event to client %s: %v. Removing client.\n", activeAddr, err)
@@ -523,21 +650,51 @@ func (s *Server) trackMouseInput() {
 				}
 			} else {
 				// --- Currently controlling local server ---
-
-				// Check if mouse is at an edge bordering a client
-				switchToClient, targetClientAddr, targetScreen := s.checkEdgeTransition(x, y)
+				switchToClient, targetClientAddr, targetLink := s.checkEdgeTransition(x, y)
 
 				if switchToClient {
 					log.Printf("Switching input to client: %s\n", targetClientAddr)
 
-					// TODO: Calculate initial client cursor position (Placeholder)
-					initialClientX := targetScreen.Original.X + 5
-					initialClientY := targetScreen.Original.Y + 5
+					// Find the server screen that was exited
+					var sourceScreen types.ScreenRect
+					for _, ss := range s.GetServerScreens() {
+						if ss.ID == targetLink.FromScreenID {
+							sourceScreen = ss
+							break
+						}
+					}
+
+					// Find the target client screen details
+					s.clientsMutex.RLock()
+					targetClientConn, targetClientOk := s.clients[targetClientAddr]
+					s.clientsMutex.RUnlock()
+					if !targetClientOk || targetClientConn.MonitorInfo == nil {
+						log.Printf("Cannot switch: Target client %s disconnected or has no monitor info.\n", targetClientAddr)
+						continue
+					}
+					var targetClientScreen types.ScreenRect
+					for _, cs := range targetClientConn.MonitorInfo.Screens {
+						if cs.ID == targetLink.ToScreenID {
+							targetClientScreen = cs
+							break
+						}
+					}
+					if targetClientScreen.W == 0 { // Check if target screen was found
+						log.Printf("Cannot switch: Target client screen ID %d not found for client %s.\n", targetLink.ToScreenID, targetClientAddr)
+						continue
+					}
+
+					// Calculate initial client cursor position
+					initialClientX, initialClientY := calculateEntryPoint(x, y,
+						sourceScreen, targetLink.FromEdge,
+						targetClientScreen, targetLink.ToEdge)
 
 					// Update state (write lock)
 					s.clientsMutex.Lock()
 					s.remoteInputActive = true
 					s.activeClientAddr = targetClientAddr
+					s.lastSentMouseX = initialClientX // Store initial client coords
+					s.lastSentMouseY = initialClientY
 					activeClient, stillExists := s.clients[targetClientAddr]
 					if !stillExists {
 						log.Printf("Target client %s disconnected before input switch could complete.", targetClientAddr)
@@ -562,25 +719,21 @@ func (s *Server) trackMouseInput() {
 	}
 }
 
-// UpdateLayout stores the virtual screen layout for a given client.
-// This would be called by the UI after a drag operation (via a channel or method).
-// For now, we assume the UI package will call this.
-func (s *Server) UpdateLayout(clientAddr string, layout map[string]*types.VirtualScreen) {
-	s.virtualLayoutsMutex.Lock()
-	defer s.virtualLayoutsMutex.Unlock()
-	log.Printf("Updating layout for client: %s\n", clientAddr)
-	s.virtualLayouts[clientAddr] = layout
-	// TODO: Persist layout?
+// UpdateLayout stores the abstract layout configuration for a given client.
+func (s *Server) UpdateLayout(clientAddr string, config *types.LayoutConfiguration) {
+	s.layoutConfigsMutex.Lock()
+	defer s.layoutConfigsMutex.Unlock()
+	log.Printf("Updating layout config for client: %s\n", clientAddr)
+	s.layoutConfigs[clientAddr] = config
+	// TODO: Persist layout config?
 }
 
-// GetLayout retrieves the virtual screen layout for a given client.
-func (s *Server) GetLayout(clientAddr string) (map[string]*types.VirtualScreen, bool) {
-	s.virtualLayoutsMutex.RLock()
-	defer s.virtualLayoutsMutex.RUnlock()
-	layout, ok := s.virtualLayouts[clientAddr]
-	// Return a copy to prevent modification?
-	// For now, return direct map, but be careful.
-	return layout, ok
+// GetLayout retrieves the abstract layout configuration for a given client.
+func (s *Server) GetLayout(clientAddr string) (*types.LayoutConfiguration, bool) {
+	s.layoutConfigsMutex.RLock()
+	defer s.layoutConfigsMutex.RUnlock()
+	config, ok := s.layoutConfigs[clientAddr]
+	return config, ok
 }
 
 // GetServerScreens retrieves the cached server screen info.
