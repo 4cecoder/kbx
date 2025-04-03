@@ -639,52 +639,54 @@ func (s *Server) GetListenPort() int {
 // matches a configured outgoing edge link.
 // Returns: switchToClient bool, targetClientAddr string, targetLink types.EdgeLink
 func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
+	// log.Printf("checkEdgeTransition: Checking coords (%d, %d)", x, y) // Verbose: uncomment if needed
 	serverScreens := s.GetServerScreens()
 	serverHostname, _ := os.Hostname()
 
 	for _, serverScreen := range serverScreens {
-		const edgeBuffer = 1
+		const edgeBuffer = 2 // Increased buffer slightly
 		currentEdge := types.ScreenEdge("")
 
-		if x <= serverScreen.X+edgeBuffer && x >= serverScreen.X {
+		// Check edges with buffer
+		if x >= serverScreen.X && x <= serverScreen.X+edgeBuffer && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H {
 			currentEdge = types.EdgeLeft
-		} else if x >= serverScreen.X+serverScreen.W-edgeBuffer && x <= serverScreen.X+serverScreen.W {
+		} else if x >= serverScreen.X+serverScreen.W-edgeBuffer && x <= serverScreen.X+serverScreen.W && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H {
 			currentEdge = types.EdgeRight
-		} else if y <= serverScreen.Y+edgeBuffer && y >= serverScreen.Y {
+		} else if y >= serverScreen.Y && y <= serverScreen.Y+edgeBuffer && x >= serverScreen.X && x < serverScreen.X+serverScreen.W {
 			currentEdge = types.EdgeTop
-		} else if y >= serverScreen.Y+serverScreen.H-edgeBuffer && y <= serverScreen.Y+serverScreen.H {
+		} else if y >= serverScreen.Y+serverScreen.H-edgeBuffer && y <= serverScreen.Y+serverScreen.H && x >= serverScreen.X && x < serverScreen.X+serverScreen.W {
 			currentEdge = types.EdgeBottom
 		}
 
-		if currentEdge == "" {
-			continue // Not on an edge of this screen
-		}
-
-		// Check configurations for all clients
-		s.layoutConfigsMutex.RLock()
-		for clientAddr, config := range s.layoutConfigs {
-			if config == nil {
-				continue
-			}
-
-			for _, link := range config.Links {
-				// Check if the link originates from the current server screen edge
-				if link.FromHostname == serverHostname &&
-					link.FromScreenID == serverScreen.ID &&
-					link.FromEdge == currentEdge {
-
-					// Found a matching outgoing link
-					log.Printf("Outgoing edge match: Server %d/%s -> Client %s Screen %d/%s\n",
-						serverScreen.ID, currentEdge, link.ToHostname, link.ToScreenID, link.ToEdge)
-					s.layoutConfigsMutex.RUnlock()
-					return true, clientAddr, link
+		if currentEdge != "" {
+			log.Printf("checkEdgeTransition: Detected edge %s on server screen %d (%s)", currentEdge, serverScreen.ID, serverHostname)
+			// Check configurations for all clients for a link FROM this edge
+			s.layoutConfigsMutex.RLock()
+			foundLink := false
+			for clientAddr, config := range s.layoutConfigs {
+				if config == nil {
+					continue
+				}
+				for _, link := range config.Links {
+					if link.FromHostname == serverHostname &&
+						link.FromScreenID == serverScreen.ID &&
+						link.FromEdge == currentEdge {
+						log.Printf("checkEdgeTransition: Found matching outgoing link! Server %d/%s -> Client %s Screen %d/%s",
+							serverScreen.ID, currentEdge, link.ToHostname, link.ToScreenID, link.ToEdge)
+						s.layoutConfigsMutex.RUnlock()
+						return true, clientAddr, link
+					}
 				}
 			}
+			s.layoutConfigsMutex.RUnlock()
+			if !foundLink {
+				log.Printf("checkEdgeTransition: Detected edge %s on screen %d, but no matching outgoing link found in layout configs.", currentEdge, serverScreen.ID)
+			}
 		}
-		s.layoutConfigsMutex.RUnlock()
+		// If loop continues, check next screen (i++)
 	}
 
-	return false, "", types.EdgeLink{} // No transition detected
+	return false, "", types.EdgeLink{} // No transition detected on any screen edge
 }
 
 // checkReturnTransition checks if the last simulated client position (x, y)
