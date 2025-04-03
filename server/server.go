@@ -327,6 +327,7 @@ func (s *Server) captureAndTrackInput() {
 
 	// --- Register Mouse Hook (Signature: func(e hook.Event)) ---
 	hook.Register(hook.MouseMove, []string{}, func(e hook.Event) {
+		// log.Printf("MouseMove Event: (%d, %d)", int(e.X), int(e.Y)) // Add this for basic event checking
 		x := int(e.X)
 		y := int(e.Y)
 
