@@ -668,6 +668,9 @@ func (s *Server) trackMouseInput() {
 				s.lastSentMouseY = y
 				s.clientsMutex.Unlock()
 
+				// Actively keep server cursor off-screen while controlling client
+				robotgo.MoveMouse(-1, -1)
+
 				err := s.sendMessage(client, types.TypeMouseEvent, mouseEvent)
 				if err != nil {
 					log.Printf("Error sending mouse event to client %s: %v. Removing client.\n", activeAddr, err)
