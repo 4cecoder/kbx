@@ -44,6 +44,15 @@ Write-Host "  CGO_CPPFLAGS   = $env:CGO_CPPFLAGS"
 Write-Host "  CGO_LDFLAGS    = $env:CGO_LDFLAGS"
 Write-Host "  PATH (updated) = $env:PATH"
 
+# Ensure latest code
+Write-Host "Ensuring latest code via git pull..."
+git pull
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "git pull failed with exit code $LASTEXITCODE. Proceeding with potentially outdated code."
+} else {
+    Write-Host "Git pull completed successfully."
+}
+
 
 # Tidy dependencies based on go.mod
 Write-Host "Running go mod tidy..."

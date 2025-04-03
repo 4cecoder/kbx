@@ -3,6 +3,10 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
+echo "--- Ensuring latest code ---"
+git pull
+echo "Git pull completed."
+
 # --- Check Prerequisites ---
 
 # Check for Go
