@@ -192,9 +192,16 @@ func (a *AppUI) startServerUI() {
 		// Get monitor info for client's first screen
 		clientScreen := targetClient.MonitorInfo.Screens[0]
 
-		// Position cursor in center of client's first screen
-		initialClientX := clientScreen.X + clientScreen.W/2
-		initialClientY := clientScreen.Y + clientScreen.H/2
+		log.Printf("UI ACTION: Switching to client %s with screen size %dx%d at position (%d,%d)",
+			targetAddr, clientScreen.W, clientScreen.H, clientScreen.X, clientScreen.Y)
+
+		// Position cursor reliably in center of client's first screen - avoid edges
+		// Use 40% of the way in from edges for safer positioning
+		initialClientX := clientScreen.X + int(float64(clientScreen.W)*0.4)
+		initialClientY := clientScreen.Y + int(float64(clientScreen.H)*0.4)
+
+		log.Printf("UI ACTION: Setting initial client cursor position to (%d,%d)",
+			initialClientX, initialClientY)
 
 		// Update state
 		a.server.SetRemoteInputActive(true)
@@ -208,21 +215,31 @@ func (a *AppUI) startServerUI() {
 			Action: types.ActionMove,
 		}
 
+		log.Printf("UI ACTION: Sending initial mouse event to client")
 		err := a.server.SendMessage(targetClient, types.TypeMouseEvent, initMouseEvent)
 		if err != nil {
-			log.Printf("Error sending initial mouse event: %v", err)
+			log.Printf("UI ERROR: Error sending initial mouse event: %v", err)
 			a.server.SetRemoteInputActive(false)
 			a.server.SetActiveClientAddr("")
 			return
 		}
 
 		// Move server cursor off-screen
+		log.Printf("UI ACTION: Moving server cursor off-screen")
 		robotgo.MoveMouse(-1, -1)
 
-		// Notify user about switch
+		// Send a second event to ensure it's received
+		time.Sleep(20 * time.Millisecond) // Increased delay for reliability
+		log.Printf("UI ACTION: Sending follow-up mouse event")
+		err = a.server.SendMessage(targetClient, types.TypeMouseEvent, initMouseEvent)
+		if err != nil {
+			log.Printf("UI ERROR: Error sending follow-up mouse event: %v", err)
+		}
+
+		// Notify user
 		fyne.CurrentApp().SendNotification(&fyne.Notification{
 			Title:   "Control Switched",
-			Content: "Now controlling client: " + targetAddr,
+			Content: "Now controlling client",
 		})
 	})
 

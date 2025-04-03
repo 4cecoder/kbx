@@ -996,13 +996,25 @@ func (s *Server) checkReturnTransition(clientX, clientY int, clientAddr string) 
 	}
 
 	clientHostname := clientConn.MonitorInfo.Hostname
+	log.Printf("RETURN CHECK: Analyzing screens for client %s (hostname: %s)",
+		clientAddr, clientHostname)
 
 	for _, clientScreen := range clientConn.MonitorInfo.Screens {
 		log.Printf("RETURN CHECK: Checking client screen %d: X[%d -> %d], Y[%d -> %d]",
 			clientScreen.ID, clientScreen.X, clientScreen.X+clientScreen.W, clientScreen.Y, clientScreen.Y+clientScreen.H)
 
-		const edgeBuffer = 10 // Increased from 1 to 10 for better sensitivity
+		// Increase buffer to reduce false edge detections
+		const edgeBuffer = 30 // Increased from 10 to 30 for less sensitivity
 		currentEdge := types.ScreenEdge("")
+
+		// Enhanced edge detection logging
+		leftEdgeProximity := clientX - clientScreen.X
+		rightEdgeProximity := (clientScreen.X + clientScreen.W) - clientX
+		topEdgeProximity := clientY - clientScreen.Y
+		bottomEdgeProximity := (clientScreen.Y + clientScreen.H) - clientY
+
+		log.Printf("EDGE PROXIMITY: Left: %d, Right: %d, Top: %d, Bottom: %d (Buffer: %d)",
+			leftEdgeProximity, rightEdgeProximity, topEdgeProximity, bottomEdgeProximity, edgeBuffer)
 
 		// Check if the *simulated* client coords are at the edge of *this* client screen
 		// Using improved detection similar to checkEdgeTransition
@@ -1021,6 +1033,7 @@ func (s *Server) checkReturnTransition(clientX, clientY int, clientAddr string) 
 		}
 
 		if currentEdge == "" {
+			log.Printf("No edge detected for screen %d at position (%d,%d)", clientScreen.ID, clientX, clientY)
 			continue
 		}
 
