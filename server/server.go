@@ -341,7 +341,7 @@ func (s *Server) captureAndTrackInput() {
 			switchToServer, targetServerScreen, targetServerEdge := s.checkReturnTransition(x, y, activeAddr) // Check using current event coords
 
 			if switchToServer {
-				log.Printf("Switching input back to server from %s\n", activeAddr)
+				log.Printf("TRANSITION: Switching input back to server from %s\n", activeAddr)
 				s.clientsMutex.RLock()
 				client, clientOk := s.clients[activeAddr]
 				clientInfo := client.MonitorInfo // Can be nil if client disconnected quickly
@@ -407,6 +407,7 @@ func (s *Server) captureAndTrackInput() {
 				s.clientsMutex.Unlock()
 
 				// Move cursor *after* releasing lock
+				log.Printf("TRANSITION: Moving server cursor to (%d, %d)", entryX, entryY)
 				robotgo.Move(entryX, entryY)
 
 			} else { // Still controlling remote client
@@ -449,7 +450,7 @@ func (s *Server) captureAndTrackInput() {
 			switchToClient, targetClientAddr, targetLink := s.checkEdgeTransition(x, y)
 
 			if switchToClient {
-				log.Printf("Switching input to client: %s\n", targetClientAddr)
+				log.Printf("TRANSITION: Switching input to client: %s\n", targetClientAddr)
 				// --- (Find source/target screens and calculate entry point) ---
 				var sourceScreen types.ScreenRect
 				for _, ss := range s.GetServerScreens() {
@@ -492,8 +493,13 @@ func (s *Server) captureAndTrackInput() {
 					s.clientsMutex.Unlock()
 					return // Exit callback
 				}
-				// Send initial message *before* unlocking mutex?
-				initMouseEvent := types.MouseEvent{X: initialClientX, Y: initialClientY}
+				// Send initial message *before* unlocking mutex
+				log.Printf("TRANSITION: Moving client cursor to initial position (%d, %d)", initialClientX, initialClientY)
+				initMouseEvent := types.MouseEvent{
+					X:      initialClientX,
+					Y:      initialClientY,
+					Action: types.ActionMove,
+				}
 				err := s.sendMessage(activeClient, types.TypeMouseEvent, initMouseEvent)
 				if err != nil {
 					log.Printf("Error sending initial mouse event to client %s: %v. Reverting switch.\n", targetClientAddr, err)
@@ -507,7 +513,20 @@ func (s *Server) captureAndTrackInput() {
 				s.clientsMutex.Unlock() // Unlock after successful initial send
 
 				// Move server cursor off-screen after switching
+				log.Printf("TRANSITION: Moving server cursor off-screen")
 				robotgo.MoveMouse(-1, -1)
+
+				// Send a second mouse move event after a short delay to ensure the client receives it
+				time.Sleep(10 * time.Millisecond)
+				if s.clients[targetClientAddr] != nil {
+					followupEvent := types.MouseEvent{
+						X:      initialClientX,
+						Y:      initialClientY,
+						Action: types.ActionMove,
+					}
+					log.Printf("TRANSITION: Sending followup mouse event to ensure receipt")
+					_ = s.sendMessage(s.clients[targetClientAddr], types.TypeMouseEvent, followupEvent)
+				}
 			}
 			// If local and no switch happened, do nothing (allow OS handle)
 		}
@@ -734,7 +753,7 @@ func (s *Server) GetListenPort() int {
 // matches a configured outgoing edge link.
 // Returns: switchToClient bool, targetClientAddr string, targetLink types.EdgeLink
 func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
-	// log.Printf("checkEdgeTransition: Checking coords (%d, %d)", x, y) // Verbose: uncomment if needed
+	log.Printf("EDGE CHECK: Checking coords (%d, %d)", x, y) // Always log edge checks
 	serverScreens := s.GetServerScreens()
 	serverHostname, _ := os.Hostname()
 
@@ -743,29 +762,32 @@ func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
 		log.Printf("Checking (%d,%d) against Screen %d: X[%d -> %d], Y[%d -> %d]",
 			x, y, serverScreen.ID, serverScreen.X, serverScreen.X+serverScreen.W, serverScreen.Y, serverScreen.Y+serverScreen.H)
 
-		const edgeBuffer = 3 // Slightly larger buffer just in case
+		const edgeBuffer = 10 // Increased buffer from 3 to 10 pixels for better sensitivity
 		currentEdge := types.ScreenEdge("")
 
-		// Refined Edge Checks:
-		// Check Left Edge: X is near left border, Y is within vertical bounds
-		if x >= serverScreen.X && x <= serverScreen.X+edgeBuffer && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H {
+		// Refined Edge Checks with improved sensitivity:
+		// Check Left Edge: X is near left border, Y is within vertical bounds with small buffer
+		if x <= serverScreen.X+edgeBuffer && y >= serverScreen.Y-edgeBuffer && y <= serverScreen.Y+serverScreen.H+edgeBuffer {
 			currentEdge = types.EdgeLeft
-			// Check Right Edge: X is near right border, Y is within vertical bounds
-		} else if x <= serverScreen.X+serverScreen.W && x >= serverScreen.X+serverScreen.W-edgeBuffer && y >= serverScreen.Y && y < serverScreen.Y+serverScreen.H {
+			log.Printf("LEFT EDGE DETECTED at (%d,%d) for screen %d", x, y, serverScreen.ID)
+			// Check Right Edge: X is near right border, Y is within vertical bounds with small buffer
+		} else if x >= serverScreen.X+serverScreen.W-edgeBuffer && y >= serverScreen.Y-edgeBuffer && y <= serverScreen.Y+serverScreen.H+edgeBuffer {
 			currentEdge = types.EdgeRight
-			// Check Top Edge: Y is near top border, X is within horizontal bounds
-		} else if y >= serverScreen.Y && y <= serverScreen.Y+edgeBuffer && x >= serverScreen.X && x < serverScreen.X+serverScreen.W {
+			log.Printf("RIGHT EDGE DETECTED at (%d,%d) for screen %d", x, y, serverScreen.ID)
+			// Check Top Edge: Y is near top border, X is within horizontal bounds with small buffer
+		} else if y <= serverScreen.Y+edgeBuffer && x >= serverScreen.X-edgeBuffer && x <= serverScreen.X+serverScreen.W+edgeBuffer {
 			currentEdge = types.EdgeTop
-			// Check Bottom Edge: Y is near bottom border, X is within horizontal bounds
-		} else if y <= serverScreen.Y+serverScreen.H && y >= serverScreen.Y+serverScreen.H-edgeBuffer && x >= serverScreen.X && x < serverScreen.X+serverScreen.W {
+			log.Printf("TOP EDGE DETECTED at (%d,%d) for screen %d", x, y, serverScreen.ID)
+			// Check Bottom Edge: Y is near bottom border, X is within horizontal bounds with small buffer
+		} else if y >= serverScreen.Y+serverScreen.H-edgeBuffer && x >= serverScreen.X-edgeBuffer && x <= serverScreen.X+serverScreen.W+edgeBuffer {
 			currentEdge = types.EdgeBottom
+			log.Printf("BOTTOM EDGE DETECTED at (%d,%d) for screen %d", x, y, serverScreen.ID)
 		}
 
 		if currentEdge != "" {
-			log.Printf("checkEdgeTransition: Detected edge %s on server screen %d (%s)", currentEdge, serverScreen.ID, serverHostname)
+			log.Printf("EDGE TRANSITION: Detected edge %s on server screen %d (%s)", currentEdge, serverScreen.ID, serverHostname)
 			// Check configurations for all clients for a link FROM this edge
 			s.layoutConfigsMutex.RLock()
-			foundLink := false
 			for clientAddr, config := range s.layoutConfigs {
 				if config == nil {
 					continue
@@ -774,7 +796,7 @@ func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
 					if link.FromHostname == serverHostname &&
 						link.FromScreenID == serverScreen.ID &&
 						link.FromEdge == currentEdge {
-						log.Printf("checkEdgeTransition: Found matching outgoing link! Server %d/%s -> Client %s Screen %d/%s",
+						log.Printf("EDGE TRANSITION: Found matching outgoing link! Server %d/%s -> Client %s Screen %d/%s",
 							serverScreen.ID, currentEdge, link.ToHostname, link.ToScreenID, link.ToEdge)
 						s.layoutConfigsMutex.RUnlock()
 						return true, clientAddr, link
@@ -782,9 +804,7 @@ func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
 				}
 			}
 			s.layoutConfigsMutex.RUnlock()
-			if !foundLink {
-				log.Printf("checkEdgeTransition: Detected edge %s on screen %d, but no matching outgoing link found in layout configs.", currentEdge, serverScreen.ID)
-			}
+			log.Printf("EDGE TRANSITION: Detected edge %s on screen %d, but no matching outgoing link found in layout configs.", currentEdge, serverScreen.ID)
 		}
 		// If loop continues, check next screen (i++)
 	}
@@ -796,10 +816,13 @@ func (s *Server) checkEdgeTransition(x, y int) (bool, string, types.EdgeLink) {
 // matches a configured incoming edge link.
 // Returns: switchToServer bool, targetServerScreen types.ScreenRect, targetServerEdge types.ScreenEdge
 func (s *Server) checkReturnTransition(clientX, clientY int, clientAddr string) (bool, types.ScreenRect, types.ScreenEdge) {
+	log.Printf("RETURN CHECK: Checking client coords (%d, %d) for return to server", clientX, clientY)
+
 	s.layoutConfigsMutex.RLock()
 	config, configOk := s.layoutConfigs[clientAddr]
 	s.layoutConfigsMutex.RUnlock()
 	if !configOk || config == nil {
+		log.Printf("RETURN CHECK: No config for client %s", clientAddr)
 		return false, types.ScreenRect{}, "" // No config for this client
 	}
 
@@ -807,29 +830,40 @@ func (s *Server) checkReturnTransition(clientX, clientY int, clientAddr string) 
 	clientConn, clientOk := s.clients[clientAddr]
 	s.clientsMutex.RUnlock()
 	if !clientOk || clientConn.MonitorInfo == nil {
+		log.Printf("RETURN CHECK: Client disconnected or no monitor info")
 		return false, types.ScreenRect{}, "" // Client disconnected or no monitor info
 	}
 
 	clientHostname := clientConn.MonitorInfo.Hostname
 
 	for _, clientScreen := range clientConn.MonitorInfo.Screens {
-		const edgeBuffer = 1
+		log.Printf("RETURN CHECK: Checking client screen %d: X[%d -> %d], Y[%d -> %d]",
+			clientScreen.ID, clientScreen.X, clientScreen.X+clientScreen.W, clientScreen.Y, clientScreen.Y+clientScreen.H)
+
+		const edgeBuffer = 10 // Increased from 1 to 10 for better sensitivity
 		currentEdge := types.ScreenEdge("")
 
 		// Check if the *simulated* client coords are at the edge of *this* client screen
-		if clientX <= clientScreen.X+edgeBuffer && clientX >= clientScreen.X {
+		// Using improved detection similar to checkEdgeTransition
+		if clientX <= clientScreen.X+edgeBuffer && clientY >= clientScreen.Y-edgeBuffer && clientY <= clientScreen.Y+clientScreen.H+edgeBuffer {
 			currentEdge = types.EdgeLeft
-		} else if clientX >= clientScreen.X+clientScreen.W-edgeBuffer && clientX <= clientScreen.X+clientScreen.W {
+			log.Printf("CLIENT LEFT EDGE DETECTED at (%d,%d) for screen %d", clientX, clientY, clientScreen.ID)
+		} else if clientX >= clientScreen.X+clientScreen.W-edgeBuffer && clientY >= clientScreen.Y-edgeBuffer && clientY <= clientScreen.Y+clientScreen.H+edgeBuffer {
 			currentEdge = types.EdgeRight
-		} else if clientY <= clientScreen.Y+edgeBuffer && clientY >= clientScreen.Y {
+			log.Printf("CLIENT RIGHT EDGE DETECTED at (%d,%d) for screen %d", clientX, clientY, clientScreen.ID)
+		} else if clientY <= clientScreen.Y+edgeBuffer && clientX >= clientScreen.X-edgeBuffer && clientX <= clientScreen.X+clientScreen.W+edgeBuffer {
 			currentEdge = types.EdgeTop
-		} else if clientY >= clientScreen.Y+clientScreen.H-edgeBuffer && clientY <= clientScreen.Y+clientScreen.H {
+			log.Printf("CLIENT TOP EDGE DETECTED at (%d,%d) for screen %d", clientX, clientY, clientScreen.ID)
+		} else if clientY >= clientScreen.Y+clientScreen.H-edgeBuffer && clientX >= clientScreen.X-edgeBuffer && clientX <= clientScreen.X+clientScreen.W+edgeBuffer {
 			currentEdge = types.EdgeBottom
+			log.Printf("CLIENT BOTTOM EDGE DETECTED at (%d,%d) for screen %d", clientX, clientY, clientScreen.ID)
 		}
 
 		if currentEdge == "" {
 			continue
 		}
+
+		log.Printf("RETURN CHECK: Detected edge %s on client screen %d", currentEdge, clientScreen.ID)
 
 		// Check the config for links originating from this client screen edge
 		for _, link := range config.Links {
@@ -843,7 +877,7 @@ func (s *Server) checkReturnTransition(clientX, clientY int, clientAddr string) 
 					// Find the target server screen
 					for _, serverScreen := range s.GetServerScreens() {
 						if serverScreen.ID == link.ToScreenID {
-							log.Printf("Incoming edge match: Client %s Screen %d/%s -> Server Screen %d/%s\n",
+							log.Printf("RETURN CHECK: Found match! Client %s Screen %d/%s -> Server Screen %d/%s\n",
 								clientHostname, clientScreen.ID, currentEdge, serverScreen.ID, link.ToEdge)
 							return true, serverScreen, link.ToEdge
 						}

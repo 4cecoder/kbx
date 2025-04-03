@@ -251,19 +251,27 @@ func (c *Client) receiveMessages() {
 
 				// Add additional debugging
 				x, y := robotgo.GetMousePos()
-				fmt.Printf("Current mouse position before move: X: %d, Y: %d\n", x, y)
+				fmt.Printf("CLIENT: Current mouse position before move: X: %d, Y: %d\n", x, y)
 
 				// Handle different mouse events based on action
 				if mouseEvent.Action == types.ActionMove || mouseEvent.Action == "" {
 					// Move the mouse cursor to the coordinates received from the server
-					robotgo.Move(mouseEvent.X, mouseEvent.Y)
-					fmt.Printf("MOUSE EVENT: Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+					fmt.Printf("CLIENT: Processing move to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+					// Use MoveSmooth for more reliable mouse movement
+					robotgo.MoveSmooth(mouseEvent.X, mouseEvent.Y, 1.0, 3.0)
+					time.Sleep(5 * time.Millisecond) // Small delay to ensure move completes
+					fmt.Printf("CLIENT: MOUSE EVENT: Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
 
-					// Verify the position after move
+					// Verify the position after move and retry if necessary
 					newX, newY := robotgo.GetMousePos()
 					if newX != mouseEvent.X || newY != mouseEvent.Y {
-						fmt.Printf("WARNING: Mouse position mismatch after move. Expected (%d,%d), got (%d,%d)\n",
+						fmt.Printf("CLIENT: WARNING: Mouse position mismatch after move. Expected (%d,%d), got (%d,%d) - Retrying\n",
 							mouseEvent.X, mouseEvent.Y, newX, newY)
+						// Try one more direct move if smooth failed
+						robotgo.Move(mouseEvent.X, mouseEvent.Y)
+						time.Sleep(5 * time.Millisecond)
+						finalX, finalY := robotgo.GetMousePos()
+						fmt.Printf("CLIENT: After retry, cursor at (%d,%d)\n", finalX, finalY)
 					}
 				} else if mouseEvent.Action == types.ActionDown {
 					// Handle mouse button down
@@ -431,19 +439,27 @@ func (c *Client) listenForMessages() {
 
 			// Add additional debugging
 			x, y := robotgo.GetMousePos()
-			fmt.Printf("Current mouse position before move: X: %d, Y: %d\n", x, y)
+			fmt.Printf("CLIENT: Current mouse position before move: X: %d, Y: %d\n", x, y)
 
 			// Handle different mouse events based on action
 			if mouseEvent.Action == types.ActionMove || mouseEvent.Action == "" {
 				// Move the mouse cursor to the coordinates received from the server
-				robotgo.Move(mouseEvent.X, mouseEvent.Y)
-				fmt.Printf("MOUSE EVENT: Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+				fmt.Printf("CLIENT: Processing move to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
+				// Use MoveSmooth for more reliable mouse movement
+				robotgo.MoveSmooth(mouseEvent.X, mouseEvent.Y, 1.0, 3.0)
+				time.Sleep(5 * time.Millisecond) // Small delay to ensure move completes
+				fmt.Printf("CLIENT: MOUSE EVENT: Moved mouse to X: %d, Y: %d\n", mouseEvent.X, mouseEvent.Y)
 
-				// Verify the position after move
+				// Verify the position after move and retry if necessary
 				newX, newY := robotgo.GetMousePos()
 				if newX != mouseEvent.X || newY != mouseEvent.Y {
-					fmt.Printf("WARNING: Mouse position mismatch after move. Expected (%d,%d), got (%d,%d)\n",
+					fmt.Printf("CLIENT: WARNING: Mouse position mismatch after move. Expected (%d,%d), got (%d,%d) - Retrying\n",
 						mouseEvent.X, mouseEvent.Y, newX, newY)
+					// Try one more direct move if smooth failed
+					robotgo.Move(mouseEvent.X, mouseEvent.Y)
+					time.Sleep(5 * time.Millisecond)
+					finalX, finalY := robotgo.GetMousePos()
+					fmt.Printf("CLIENT: After retry, cursor at (%d,%d)\n", finalX, finalY)
 				}
 			} else if mouseEvent.Action == types.ActionDown {
 				// Handle mouse button down
